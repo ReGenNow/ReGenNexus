@@ -10,3 +10,4 @@ Version0.1.0/
 
 # macOS metadata files
 .DS_Store
+.claude/
