@@ -8,13 +8,14 @@ Copyright (c) 2024-2025 ReGen Designs LLC
 
 import asyncio
 import pytest
+import pytest_asyncio
 from typing import Dict, Any
 
 
 class TestRaspberryPiPlugin:
     """Tests for Raspberry Pi plugin."""
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def plugin(self):
         """Create plugin instance."""
         from regennexus.plugins import get_raspberry_pi_plugin
@@ -70,7 +71,7 @@ class TestRaspberryPiPlugin:
 class TestArduinoPlugin:
     """Tests for Arduino plugin."""
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def plugin(self):
         """Create plugin instance."""
         from regennexus.plugins import get_arduino_plugin
@@ -120,7 +121,7 @@ class TestArduinoPlugin:
 class TestJetsonPlugin:
     """Tests for Jetson plugin."""
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def plugin(self):
         """Create plugin instance."""
         from regennexus.plugins import get_jetson_plugin
@@ -168,7 +169,7 @@ class TestJetsonPlugin:
 class TestIoTPlugin:
     """Tests for IoT plugin."""
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def plugin(self):
         """Create plugin instance."""
         from regennexus.plugins import get_iot_plugin
@@ -231,7 +232,7 @@ class TestIoTPlugin:
 class TestAmberB1Plugin:
     """Tests for Amber B1 robotic arm plugin."""
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def plugin(self):
         """Create plugin instance."""
         from regennexus.plugins import get_amber_b1_plugin
@@ -312,7 +313,7 @@ class TestAmberB1Plugin:
 class TestLucidOnePlugin:
     """Tests for Lucid One robotic arm plugin."""
 
-    @pytest.fixture
+    @pytest_asyncio.fixture
     async def plugin(self):
         """Create plugin instance."""
         from regennexus.plugins import get_lucid_one_plugin

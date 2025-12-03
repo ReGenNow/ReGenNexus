@@ -8,7 +8,10 @@
       "Bash(git commit -m \"$(cat <<''EOF''\nAdd MCP integration, mesh networking, LLM bridge, and robotic arm plugins\n\n- Add MCP server for Claude Desktop integration (regennexus.mcp_server)\n- Add LLM bridge for Ollama/LM Studio hardware control\n- Add mesh networking with auto-discovery across LAN devices\n- Add Amber B1 and Lucid One robotic arm plugins with gripper support\n- Restructure codebase from src/ to regennexus/ package\n- Add comprehensive documentation (MCP, robotic arms)\n- Add examples for MCP, LLM, mesh networking, and robotic arms\n- Update README with MCP configuration and new features\n\n🤖 Generated with [Claude Code](https://claude.com/claude-code)\n\nCo-Authored-By: Claude <noreply@anthropic.com>\nEOF\n)\")",
       "Bash(git checkout:*)",
       "Bash(git rebase:*)",
-      "Bash(GIT_EDITOR=true git rebase:*)"
+      "Bash(GIT_EDITOR=true git rebase:*)",
+      "Bash(python -m regennexus.mcp_server:*)",
+      "Bash(python -m pytest:*)",
+      "Bash(pip install:*)"
     ],
     "deny": [],
     "ask": []

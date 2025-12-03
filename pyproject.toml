@@ -142,10 +142,6 @@ Changelog = "https://github.com/ReGenNow/ReGenNexus/blob/main/CHANGELOG.md"
 regen = "regennexus.cli:main"
 regennexus = "regennexus.cli:main"
 
-[tool.setuptools]
-packages = ["regennexus"]
-package-dir = {"" = "."}
-
 [tool.setuptools.packages.find]
 where = ["."]
 include = ["regennexus*"]
