@@ -10,4 +10,31 @@ Version0.1.0/
 
 # macOS metadata files
 .DS_Store
+
+# IDE and editor
 .claude/
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Sensitive files - NEVER commit these
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*.pfx
+credentials.json
+secrets.yaml
+secrets.yml
+*_secret*
+*.credentials
+
+# Local config (may contain secrets)
+regennexus-config.yaml
+config.local.yaml
+
+# Logs
+*.log
+logs/
