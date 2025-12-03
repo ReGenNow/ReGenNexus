@@ -1,2 +1,12 @@
 # Ignore folder containing the old project version
+# Version0.1.0/
+bot/
+__pycache__/
+*.pyc
+build/
+dist/
+*.egg-info/
 Version0.1.0/
+
+# macOS metadata files
+.DS_Store

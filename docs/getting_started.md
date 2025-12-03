@@ -1,150 +1,281 @@
-# Getting Started with ReGenNexus Core
+# Getting Started with RegenNexus UAP
 
-This guide will help you get started with ReGenNexus Core, an open-source implementation of the Universal Agent Protocol (UAP) for seamless communication between digital entities.
+RegenNexus is a **Universal Adapter Protocol** - an open-source framework for fast, secure communication between devices, robots, apps, and AI agents. Think of it as "MCP for hardware" - connect anything to anything with minimal latency and maximum security.
 
 ## Installation
-
-### Prerequisites
-
-- Python 3.8 or higher
-- pip (Python package installer)
-- Git (for cloning the repository)
-
-### Installing from GitHub
-
-```bash
-# Clone the repository
-git clone https://github.com/ReGenNow/ReGenNexus.git
-cd ReGenNexus
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Install in development mode
-pip install -e .
-```
-
-### Installing with pip
 
 ```bash
 pip install regennexus
 ```
 
-## Basic Usage
+Or install from source:
+```bash
+git clone https://github.com/ReGenNow/ReGenNexus.git
+cd ReGenNexus
+pip install -e .
+```
 
-### Creating a Simple Client
+## Quick Start
+
+### 1. Basic Communication (< 5 minutes)
+
+Connect two entities and send a message:
 
 ```python
 import asyncio
-from regennexus.protocol.client import UAP_Client
-from regennexus.protocol.message import UAP_Message
+from regennexus import RegenNexusProtocol
 
 async def main():
-    # Create a client
-    client = UAP_Client(entity_id="my_agent", registry_url="localhost:8000")
-    
-    # Connect to the registry
-    await client.connect()
-    
-    # Send a message
-    message = UAP_Message(
-        sender="my_agent",
-        recipient="target_device",
-        intent="command",
-        payload={"action": "turn_on", "parameters": {"device": "light"}}
-    )
-    await client.send_message(message)
-    
-    # Keep the client running
-    await client.run()
+    # Create protocol instance
+    protocol = RegenNexusProtocol()
+    await protocol.initialize()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    # Register two entities
+    await protocol.registry.register_entity(
+        entity_id="sensor_01",
+        entity_type="device",
+        capabilities=["temperature", "humidity"]
+    )
+
+    await protocol.registry.register_entity(
+        entity_id="controller_01",
+        entity_type="controller",
+        capabilities=["command", "monitor"]
+    )
+
+    # Send a message
+    await protocol.send_message(
+        sender="controller_01",
+        recipient="sensor_01",
+        intent="read",
+        payload={"sensors": ["temperature", "humidity"]}
+    )
+
+    print("Message sent!")
+    await protocol.shutdown()
+
+asyncio.run(main())
 ```
 
-### Handling Messages
+### 2. Using Device Plugins
+
+Control real hardware with mock mode for development:
 
 ```python
-# Register a message handler
-async def handle_message(message):
-    print(f"Received message: {message.payload}")
-    
-    # Respond to the message
-    if message.intent == "query":
-        response = UAP_Message(
-            sender=client.entity_id,
-            recipient=message.sender,
-            intent="response",
-            payload={"status": "success", "data": {"temperature": 22.5}},
-            context_id=message.context_id
-        )
-        await client.send_message(response)
+import asyncio
+from regennexus.plugins import get_raspberry_pi_plugin
 
-client.register_message_handler(handle_message)
+async def main():
+    # Get the plugin class
+    RaspberryPiPlugin = get_raspberry_pi_plugin()
+
+    # Create plugin in mock mode (no hardware needed)
+    rpi = RaspberryPiPlugin(
+        entity_id="rpi_001",
+        mock_mode=True  # Set False for real hardware
+    )
+
+    # Initialize
+    await rpi.initialize()
+
+    # Control GPIO
+    result = await rpi.execute_command("gpio.write", {
+        "pin": 18,
+        "value": 1
+    })
+    print(f"GPIO write: {result}")
+
+    # Read GPIO
+    result = await rpi.execute_command("gpio.read", {"pin": 17})
+    print(f"GPIO read: {result}")
+
+    await rpi.shutdown()
+
+asyncio.run(main())
 ```
 
-## Running the Registry Server
+### 3. Control Robotic Arms
 
-ReGenNexus Core includes a registry server that facilitates entity discovery and message routing:
+```python
+import asyncio
+from regennexus.plugins import get_amber_b1_plugin, get_lucid_one_plugin
+
+async def main():
+    # Amber B1 arm
+    AmberB1 = get_amber_b1_plugin()
+    arm = AmberB1(entity_id="arm_001", mock_mode=True)
+    await arm.initialize()
+
+    # Move to position
+    await arm.move_to([0, 45, -30, 0, 90, 0, 0], duration=2.0)
+
+    # Control gripper
+    await arm.open_gripper()
+    await asyncio.sleep(1)
+    await arm.close_gripper(force=15.0)
+
+    # Home the arm
+    await arm.home()
+
+    await arm.shutdown()
+
+asyncio.run(main())
+```
+
+## What You Can Do
+
+### Device Communication
+- **Raspberry Pi**: GPIO, PWM, camera, sensors
+- **Arduino**: Digital/analog I/O, serial commands
+- **NVIDIA Jetson**: GPU, CUDA, camera, inference
+- **IoT Devices**: MQTT, HTTP, CoAP protocols
+
+### Robotic Arms
+- **Amber B1**: 7-DOF control, gripper, trajectory
+- **Lucid One**: Cartesian control, force sensing, teach mode
+
+### Transport Layers
+- **IPC**: < 0.1ms latency (local processes)
+- **UDP Multicast**: 1-5ms (LAN discovery)
+- **WebSocket**: 10-50ms (remote/internet)
+- **Message Queue**: Reliable with persistence
+
+### Security Features
+- **Encryption**: AES-128/256-GCM
+- **Key Exchange**: ECDH-384
+- **Authentication**: Tokens, API keys
+- **Rate Limiting**: Adaptive throttling
+
+## Configuration
+
+Create `regennexus-config.yaml`:
+
+```yaml
+version: "0.2"
+
+security:
+  encryption_enabled: true
+  algorithm: "AES-256-GCM"
+  authentication:
+    method: "token"
+    token_expiry: 3600
+
+communication:
+  transport: "auto"
+  default_timeout: 30.0
+  retry_attempts: 3
+
+registry:
+  discovery_enabled: true
+  heartbeat_interval: 30
+
+logging:
+  level: "INFO"
+  file: "regennexus.log"
+```
+
+Load configuration:
+
+```python
+from regennexus.config import load_config
+
+config = load_config("regennexus-config.yaml")
+protocol = RegenNexusProtocol(config=config)
+```
+
+## CLI Usage
 
 ```bash
 # Start the registry server
-python -m regennexus.registry.server --host 0.0.0.0 --port 8000
+regen server --host 0.0.0.0 --port 8080
+
+# Run an example
+regen run examples/simple_connection/basic_protocol_example.py
+
+# Check version
+regen version
 ```
 
-## Using Security Features
+## Examples
 
-ReGenNexus Core includes robust security features:
-
+### Sensor Network
 ```python
-from regennexus.security.crypto import generate_keypair
-from regennexus.security.auth import create_certificate
+# Multiple sensors reporting to a controller
+sensors = []
+for i in range(5):
+    sensor = TemperatureSensor(entity_id=f"temp_{i}", mock_mode=True)
+    await sensor.initialize()
+    sensors.append(sensor)
 
-# Generate a keypair for secure communication
-private_key, public_key = generate_keypair()
-
-# Create a certificate for authentication
-certificate = create_certificate(
-    entity_id="my_agent",
-    public_key=public_key,
-    valid_days=365
-)
-
-# Create a secure client
-secure_client = UAP_Client(
-    entity_id="my_agent",
-    registry_url="localhost:8000",
-    private_key=private_key,
-    certificate=certificate
-)
+# Controller aggregates data
+controller = DataController(entity_id="aggregator")
+for sensor in sensors:
+    data = await sensor.read()
+    controller.process(data)
 ```
 
-## Working with Device Plugins
-
-ReGenNexus Core includes plugins for various devices:
-
+### Pick and Place Robot
 ```python
-from regennexus.plugins.raspberry_pi import RaspberryPiPlugin
+async def pick_and_place(arm, pick_pos, place_pos):
+    """Simple pick and place operation."""
+    # Move above pick position
+    await arm.move_to_pose(pick_pos[0], pick_pos[1], pick_pos[2] + 50)
 
-# Create a Raspberry Pi plugin
-rpi_plugin = RaspberryPiPlugin()
+    # Open gripper
+    await arm.open_gripper()
 
-# Register the plugin with a client
-client.register_plugin(rpi_plugin)
+    # Move down to pick
+    await arm.move_to_pose(*pick_pos)
 
-# Use the plugin
-gpio_status = await client.execute_plugin_action(
-    plugin_id="raspberry_pi",
-    action="read_gpio",
-    parameters={"pin": 18}
-)
+    # Close gripper
+    await arm.close_gripper(force=20.0)
+
+    # Lift
+    await arm.move_to_pose(pick_pos[0], pick_pos[1], pick_pos[2] + 50)
+
+    # Move to place position
+    await arm.move_to_pose(place_pos[0], place_pos[1], place_pos[2] + 50)
+
+    # Lower and release
+    await arm.move_to_pose(*place_pos)
+    await arm.open_gripper()
+```
+
+### Secure Communication
+```python
+from regennexus.security import AESEncryptor, TokenAuth
+
+# Create encryptor
+encryptor = AESEncryptor()
+key = encryptor.generate_key()
+
+# Encrypt message
+encrypted = encryptor.encrypt(b"secret data", key)
+
+# Create authenticator
+auth = TokenAuth(secret_key="your-secret-key")
+token = auth.generate_token("user_001", expires_in=3600)
+
+# Validate
+result = auth.validate_token(token)
+print(f"Valid: {result.valid}, User: {result.entity_id}")
 ```
 
 ## Next Steps
 
-- Explore the [examples directory](../examples/) for more detailed examples
-- Read the [API Reference](api_reference.md) for detailed documentation
-- Learn about [security features](security.md) for secure communication
-- Discover [device integration](device_integration.md) capabilities
-- Explore [ROS integration](ros_integration.md) for robotics applications
-- Learn about the [Azure Bridge](azure_bridge.md) for cloud connectivity
+- [API Reference](api_reference.md) - Complete API documentation
+- [Device Integration](device_integration.md) - Hardware guides
+- [Security Guide](security.md) - Security best practices
+- [ROS Integration](ros_integration.md) - Robot Operating System
+- [Examples](../examples/) - More code examples
+
+## Support
+
+- GitHub Issues: https://github.com/ReGenNow/ReGenNexus/issues
+- Documentation: https://regennexus.readthedocs.io
+
+---
+
+**RegenNexus UAP** - Connect Everything, Securely.
+
+Copyright (c) 2024-2025 ReGen Designs LLC | MIT License

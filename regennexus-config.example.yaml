@@ -1,0 +1,182 @@
+# ============================================================
+# RegenNexus UAP Configuration
+# Universal Adapter Protocol by ReGen Designs LLC
+# ============================================================
+#
+# Copy this file to 'regennexus-config.yaml' and customize.
+# All settings have sensible defaults - you only need to change
+# what you want to customize.
+#
+# Usage:
+#   regen start --config regennexus-config.yaml
+#
+#   Or in Python:
+#   import regennexus
+#   regen = regennexus.start(config="regennexus-config.yaml")
+# ============================================================
+
+# === SECURITY ===
+# All security features can be enabled/disabled independently
+security:
+  # Master switch - turn all security on/off
+  enabled: true
+
+  # Security level: 1=basic, 2=medium (recommended), 3=maximum
+  level: 2
+
+  # Encryption: Scrambles messages so only recipient can read
+  # Options: "none", "aes-128", "aes-256-gcm", "ecdh-384"
+  encryption: "aes-256-gcm"
+
+  # Authentication settings
+  authentication:
+    # Token auth - like a VIP wristband
+    token:
+      enabled: false
+      secret: "change-this-secret-key"
+      expire_hours: 24
+
+    # API Keys - password for apps
+    api_keys:
+      enabled: false
+      keys: []
+      # Example:
+      # keys:
+      #   - name: "my-robot"
+      #     key: "rgn_robot_abc123"
+      #     permissions: ["read", "write", "control"]
+      #   - name: "monitoring-app"
+      #     key: "rgn_monitor_xyz789"
+      #     permissions: ["read"]
+
+  # Rate Limiting: Prevent spam/attacks
+  rate_limiting:
+    enabled: false
+    requests_per_minute: 100
+    burst_limit: 20
+
+# === COMMUNICATION ===
+# Choose how devices talk to each other
+communication:
+  # Auto-select best method based on situation
+  auto_select: true
+
+  # Local IPC: Same computer, super fast (< 0.1ms)
+  # Use for: Apps on same PC/server
+  local_ipc:
+    enabled: true
+    method: "unix_socket"          # "unix_socket", "shared_memory", "named_pipe"
+    socket_path: "/tmp/regennexus.sock"
+
+  # UDP Multicast: Find devices on same WiFi (1-5ms)
+  # Use for: Device discovery on local network
+  udp_discovery:
+    enabled: true
+    multicast_group: "224.0.0.251"
+    port: 5353
+    broadcast_interval: 5          # seconds
+
+  # WebSocket: Internet/remote communication (10-50ms)
+  # Use for: Cloud, remote control, cross-network
+  websocket:
+    enabled: true
+    host: "0.0.0.0"
+    port: 8765
+    ssl: false                     # true for secure connections
+    ssl_cert: ""                   # path to certificate
+    ssl_key: ""                    # path to key
+
+  # Message Queue: Reliable delivery (messages wait if offline)
+  # Use for: Critical commands that MUST be delivered
+  message_queue:
+    enabled: false
+    max_queue_size: 1000
+    retry_attempts: 3
+    retry_delay: 5                 # seconds
+
+# === REGISTRY MODE ===
+# How devices find and talk to each other
+registry:
+  # "central" = all devices connect to one server (easier)
+  # "p2p" = devices connect directly to each other (no server needed)
+  # "hybrid" = use central for discovery, then direct connection
+  mode: "hybrid"
+
+  # Central server settings (if mode is "central" or "hybrid")
+  server:
+    host: "localhost"
+    port: 8000
+    auto_start: true
+
+# === DEVICES ===
+# Enable/disable device support
+devices:
+  raspberry_pi:
+    enabled: true
+    gpio_mode: "BCM"               # "BCM" or "BOARD"
+    mock_mode: false               # true = simulate without hardware
+
+  arduino:
+    enabled: true
+    auto_detect: true              # automatically find connected Arduino
+    port: "auto"                   # or specific like "COM3", "/dev/ttyUSB0"
+    baud_rate: 115200
+    mock_mode: false
+
+  jetson:
+    enabled: true
+    use_cuda: true
+    use_tensorrt: true
+    mock_mode: false
+
+  esp32:
+    enabled: true
+    wifi_mode: "station"           # "station" or "access_point"
+    mock_mode: false
+
+  generic_iot:
+    enabled: true
+    protocols: ["mqtt", "http", "coap"]
+
+# === BRIDGES ===
+# Connect to external systems
+bridges:
+  ros2:
+    enabled: false
+    node_name: "regennexus_bridge"
+
+  azure_iot:
+    enabled: false
+    connection_string: ""
+
+  mqtt:
+    enabled: false
+    broker: "localhost"
+    port: 1883
+    username: ""
+    password: ""
+
+# === API SERVER ===
+# REST API for external applications
+api:
+  enabled: true
+  host: "0.0.0.0"
+  port: 8080
+
+  # API documentation (Swagger/OpenAPI)
+  docs:
+    enabled: true
+    path: "/docs"
+
+  # CORS: Allow web browsers to access API
+  cors:
+    enabled: true
+    origins: ["*"]                 # or specific: ["http://localhost:3000"]
+
+# === LOGGING ===
+logging:
+  level: "INFO"                    # DEBUG, INFO, WARNING, ERROR
+  file: null                       # or "regennexus.log" to save to file
+  max_size_mb: 10
+  backup_count: 3
+  console: true                    # also print to terminal

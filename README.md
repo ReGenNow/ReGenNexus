@@ -1,145 +1,218 @@
-# ReGenNexus Core
+# RegenNexus UAP
 
-ReGenNexus Core is an open-source implementation of the Universal Agent Protocol (UAP) developed by ReGen Designs LLC. It provides a standardized communication framework for digital entities to interact seamlessly.
+**Universal Adapter Protocol** - Connect devices, robots, apps, and AI agents with minimal latency and maximum security. MCP-compatible for seamless AI integration.
 
-![ReGenNexus Logo](src/images/RegenNexus.png)
+![ReGenNexus Logo](images/RegenNexus.png)
 
-## Core Features
-
-- **Message Protocol**: Standardized message format for entity communication
-- **Entity Registry**: Discovery and registration system for digital entities
-- **Context Management**: Conversation state and history tracking
-- **Enhanced Security**: End-to-end encryption with ECDH-384 and certificate-based authentication
-- **Device Integration**: Support for Raspberry Pi, Arduino, Jetson, and IoT devices
-- **ROS 2 Integration**: Bridge for Robot Operating System communication
-- **Azure IoT Bridge**: Standalone bridge for Azure IoT Hub connectivity
-
-## Interactive Demos
-
-Try ReGenNexus interactively in Google Colab:
-
-- [Basic Demo](https://colab.research.google.com/github/ReGenNow/ReGenNexus/blob/main/examples/binder/colab_basic_demo.ipynb) - Demonstrates core communication features between agents
-- [Security Demo](https://colab.research.google.com/github/ReGenNow/ReGenNexus/blob/main/examples/binder/colab_security_demo.ipynb) - Showcases enhanced security features including ECDH-384, certificates, and policy-based access control
-
-These notebooks allow you to experience ReGenNexus functionality without setting up anything locally.
-
-## Getting Started
-
-### Installation
-
-### Standard Installation (Recommended for Users)
+## Installation
 
 ```bash
-# Clone the repository
-git clone https://github.com/ReGenNow/ReGenNexus.git
-
-cd ReGenNexus
-# Create a virtual environment 
-python3 -m venv venv
-source bot/bin/activate
-pip install .
-
-# Run the registry and client
-regennexus-registry  # Starts the server
-regennexus-client    # Runs the client
+pip install regennexus
 ```
-### Development Installation (For Contributors)
 
+Or with all features:
 ```bash
-git clone https://github.com/ReGenNow/ReGenNexus.git
-cd ReGenNexus
-
-# Install dependencies
-pip install -r requirements.txt
-
-# Install in development mode
-pip install -e .
-
-# Run the registry and client
-regennexus-registry  # Starts the server
-regennexus-client    # Runs the client
+pip install regennexus[full]
 ```
 
-### Quick Example
+## Quick Start
 
 ```python
 import asyncio
-from regennexus.protocol.client import UAP_Client
-from regennexus.protocol.message import UAP_Message
+from regennexus import RegenNexusProtocol
 
 async def main():
-    # Create a client
-    client = UAP_Client(entity_id="my_agent", registry_url="localhost:8000")
-    
-    # Connect to the registry
-    await client.connect()
-    
-    # Send a message
-    message = UAP_Message(
-        sender="my_agent",
-        recipient="target_device",
-        intent="command",
-        payload={"action": "turn_on", "parameters": {"device": "light"}}
-    )
-    await client.send_message(message)
-    
-    # Register a message handler
-    async def handle_message(message):
-        print(f"Received message: {message.payload}")
-    
-    client.register_message_handler(handle_message)
-    
-    # Keep the client running
-    await client.run()
+    protocol = RegenNexusProtocol()
+    await protocol.initialize()
 
-if __name__ == "__main__":
-    asyncio.run(main())
+    # Register entities
+    await protocol.registry.register_entity(
+        entity_id="sensor_01",
+        entity_type="device",
+        capabilities=["temperature", "humidity"]
+    )
+
+    # Send messages
+    await protocol.send_message(
+        sender="controller",
+        recipient="sensor_01",
+        intent="read",
+        payload={"sensors": ["temperature"]}
+    )
+
+    await protocol.shutdown()
+
+asyncio.run(main())
+```
+
+## Features
+
+### Device Support
+- **Raspberry Pi** - GPIO, PWM, camera, sensors
+- **Arduino** - Digital/analog I/O, serial commands
+- **NVIDIA Jetson** - GPU, CUDA, camera, inference
+- **IoT Devices** - MQTT, HTTP, CoAP protocols
+
+### Robotic Arms
+- **Amber B1** - 7-DOF control, gripper, trajectory
+- **Lucid One** - Cartesian control, force sensing, teach mode
+
+```python
+from regennexus.plugins import get_amber_b1_plugin
+
+AmberB1 = get_amber_b1_plugin()
+arm = AmberB1(entity_id="arm_001", mock_mode=True)
+await arm.initialize()
+
+# Move joints
+await arm.move_to([0, 45, -30, 0, 90, 0, 0], duration=2.0)
+
+# Gripper control
+await arm.open_gripper()
+await arm.close_gripper(force=15.0)
+```
+
+### Transport Layers
+| Transport | Latency | Use Case |
+|-----------|---------|----------|
+| IPC | < 0.1ms | Local processes |
+| UDP Multicast | 1-5ms | LAN discovery |
+| WebSocket | 10-50ms | Remote/internet |
+| Message Queue | Variable | Reliable delivery |
+
+### Security
+- **Encryption**: AES-128/256-GCM
+- **Key Exchange**: ECDH-384
+- **Authentication**: Tokens, API keys
+- **Rate Limiting**: Adaptive throttling
+
+### AI Integration (MCP)
+
+Control hardware directly from Claude Desktop or any MCP-compatible AI:
+
+```bash
+# Start MCP server for Claude Desktop
+python -m regennexus.mcp_server
+```
+
+Configure in `claude_desktop_config.json`:
+```json
+{
+    "mcpServers": {
+        "regennexus": {
+            "command": "python",
+            "args": ["-m", "regennexus.mcp_server"]
+        }
+    }
+}
+```
+
+Now ask Claude:
+- "Move the robot arm to pick position"
+- "Turn on GPIO pin 17"
+- "What's the temperature sensor reading?"
+
+### LLM Bridge (Ollama, LM Studio)
+
+Connect local LLMs to hardware:
+
+```python
+from regennexus.bridges import LLMBridge, LLMConfig
+
+llm = LLMBridge(LLMConfig(provider="ollama", model="llama3"))
+response = await llm.chat("Turn on the lights")
+```
+
+### Mesh Networking
+
+Auto-discovery across devices on the network:
+
+```python
+from regennexus.core import MeshNetwork, MeshConfig
+
+mesh = MeshNetwork(MeshConfig(
+    node_id="controller",
+    capabilities=["command"]
+))
+await mesh.start()
+
+# Devices auto-discovered
+for peer in mesh.get_peers():
+    print(f"Found: {peer.node_id} ({peer.capabilities})")
+```
+
+## Interactive Demos
+
+Try RegenNexus in Google Colab:
+
+- [Basic Demo](https://colab.research.google.com/github/ReGenNow/ReGenNexus/blob/main/examples/binder/colab_basic_demo.ipynb) - Core communication
+- [Security Demo](https://colab.research.google.com/github/ReGenNow/ReGenNexus/blob/main/examples/binder/colab_security_demo.ipynb) - Encryption & auth
+
+## CLI Usage
+
+```bash
+# Start server
+regen server --host 0.0.0.0 --port 8080
+
+# Run example
+regen run examples/robotic_arms/arm_demo.py
+
+# Version info
+regen version
+```
+
+## Optional Dependencies
+
+```bash
+pip install regennexus[api]        # FastAPI server
+pip install regennexus[mqtt]       # MQTT support
+pip install regennexus[robotics]   # Robotic arms
+pip install regennexus[arduino]    # Arduino support
+pip install regennexus[dev]        # Development tools
 ```
 
 ## Documentation
 
-- [Getting Started Guide](docs/getting_started.md)
-- [Core Protocol Documentation](docs/core_protocol.md)
-- [API Reference](docs/api_reference.md)
-- [Security Guide](docs/security.md)
+- [Getting Started](docs/getting_started.md)
+- [MCP Integration](docs/mcp_integration.md)
 - [Device Integration](docs/device_integration.md)
+- [Robotic Arms Guide](docs/robotic_arms.md)
+- [Security Guide](docs/security.md)
+- [API Reference](docs/api_reference.md)
 - [ROS Integration](docs/ros_integration.md)
-- [Azure Bridge](docs/azure_bridge.md)
-- [Docker Deployment](docs/docker_deployment.md)
 
 ## Examples
 
-The `examples/` directory contains several examples demonstrating different aspects of the protocol:
+```
+examples/
+├── simple_connection/    # Basic protocol usage
+├── mcp_integration/      # Claude Desktop & LLM demos
+├── mesh_network/         # Device auto-discovery
+├── llm_integration/      # Ollama/LM Studio demos
+├── robotic_arms/         # Amber B1 & Lucid One demos
+├── ros_integration/      # ROS 2 bridge examples
+├── security/             # Encryption & auth
+└── binder/               # Jupyter notebooks
+```
 
-- **Simple Connection**: Basic protocol usage and tutorial
-- **Security**: Authentication and encryption features
-- **Device Integration**: Working with Raspberry Pi, Arduino, and Jetson devices
-- **ROS Integration**: Connecting with Robot Operating System
-- **Patterns**: Event-driven communication patterns
-
-## Docker Support
-
-ReGenNexus Core includes Docker support for easy deployment:
+## Docker
 
 ```bash
-# Build and run with Docker Compose
 docker-compose up
 ```
 
-See the [Docker Deployment Guide](docs/docker_deployment.md) for more details.
+See [Docker Deployment](docs/docker_deployment.md) for details.
 
 ## Contributing
 
-We welcome contributions to ReGenNexus Core! Please see [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
-
-## Roadmap
-
-See [ROADMAP.md](ROADMAP.md) for the development roadmap and future plans.
+We welcome contributions! See [CONTRIBUTING.md](CONTRIBUTING.md) for guidelines.
 
 ## License
 
-ReGenNexus Core is released under the MIT License. See [LICENSE](LICENSE) for details.
+MIT License - see [LICENSE](LICENSE) for details.
 
-## About ReGen Designs LLC
+---
 
-ReGen Designs LLC is focused on creating next-generation communication protocols for digital entities. The ReGenNexus project aims to establish a universal standard for agent communication.
+**RegenNexus UAP** - Connect Everything, Securely.
+
+Copyright (c) 2024-2025 ReGen Designs LLC

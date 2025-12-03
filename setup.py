@@ -22,11 +22,11 @@ setup(
     description="ReGenNexus Core - Universal Agent Protocol",
     long_description=long_description,
     long_description_content_type="text/markdown",
-    author="ReGenNow",
-    author_email="info@regennow.com",
+    author="ReGen Designs LLC",
+    author_email="info@regendesigns.com",
     url="https://github.com/ReGenNow/ReGenNexus",
-    packages=find_packages(where="src"),
-    package_dir={"": "src"},
+    packages=find_packages(where="."),  # Look for packages in the root directory
+    package_dir={"": "."},  # Map the root package to the current directory
     classifiers=[
         "Development Status :: 3 - Alpha",
         "Intended Audience :: Developers",
@@ -67,6 +67,10 @@ setup(
         "console_scripts": [
             "regennexus-registry=regennexus.registry.cli:main",
             "regennexus-client=regennexus.protocol.cli:main",
+            "regennexus-ros-amber-b1=examples.ros_integration.amber_b1.amber_b1_arm_example:main",
+            "regennexus-ros-amber-b1-moveit=examples.ros_integration.amber_b1.amber_b1_moveit_example:main",
+            "regennexus-ros-amber-lucid1-moveit=examples.ros_integration.amber_lucid1.amber_lucid1_moveit_example:main",
+            "regennexus-ros-amber-lucid1=examples.ros_integration.amber_lucid1.amber_lucid1_arm_example:main",
         ],
     },
 )

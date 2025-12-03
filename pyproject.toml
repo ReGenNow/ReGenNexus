@@ -1,0 +1,203 @@
+[build-system]
+requires = ["setuptools>=61.0", "wheel"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "regennexus"
+version = "0.2.0"
+description = "Universal Adapter Protocol for fast device communication"
+readme = "README.md"
+license = {text = "MIT"}
+authors = [
+    {name = "ReGen Designs LLC", email = "contact@regendesigns.com"}
+]
+maintainers = [
+    {name = "ReGen Designs LLC", email = "contact@regendesigns.com"}
+]
+keywords = [
+    "iot",
+    "devices",
+    "communication",
+    "protocol",
+    "robotics",
+    "raspberry-pi",
+    "arduino",
+    "jetson",
+    "esp32",
+    "ros",
+    "mqtt",
+    "websocket",
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Intended Audience :: Science/Research",
+    "License :: OSI Approved :: MIT License",
+    "Operating System :: OS Independent",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.8",
+    "Programming Language :: Python :: 3.9",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+    "Topic :: Internet :: WWW/HTTP",
+    "Topic :: Scientific/Engineering",
+    "Topic :: Software Development :: Libraries :: Python Modules",
+    "Topic :: System :: Hardware",
+    "Topic :: System :: Networking",
+]
+requires-python = ">=3.8"
+dependencies = [
+    "pyyaml>=6.0",
+    "websockets>=10.0",
+    "aiohttp>=3.8.0",
+    "pycryptodome>=3.15.0",
+]
+
+[project.optional-dependencies]
+# Full installation with all features
+full = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "click>=8.0.0",
+    "pydantic>=2.0.0",
+    "aiomqtt>=1.0.0",
+]
+
+# API server
+api = [
+    "fastapi>=0.100.0",
+    "uvicorn>=0.20.0",
+    "pydantic>=2.0.0",
+]
+
+# CLI tools
+cli = [
+    "click>=8.0.0",
+]
+
+# Raspberry Pi support
+raspberry-pi = [
+    "RPi.GPIO>=0.7.0",
+    "picamera>=1.13; platform_machine=='armv7l' or platform_machine=='aarch64'",
+]
+
+# Arduino support
+arduino = [
+    "pyserial>=3.5",
+]
+
+# NVIDIA Jetson support
+jetson = [
+    "Jetson.GPIO>=2.0.0; platform_machine=='aarch64'",
+]
+
+# MQTT support
+mqtt = [
+    "aiomqtt>=1.0.0",
+]
+
+# ROS 2 support
+ros2 = [
+    "rclpy>=1.0.0",
+]
+
+# Robotic arms (Amber B1, Lucid One)
+robotics = [
+    "numpy>=1.20.0",
+]
+
+# Azure IoT support
+azure = [
+    "azure-iot-device>=2.0.0",
+]
+
+# Development tools
+dev = [
+    "pytest>=7.0.0",
+    "pytest-asyncio>=0.20.0",
+    "pytest-cov>=4.0.0",
+    "black>=23.0.0",
+    "isort>=5.0.0",
+    "mypy>=1.0.0",
+    "flake8>=6.0.0",
+]
+
+# Documentation
+docs = [
+    "mkdocs>=1.4.0",
+    "mkdocs-material>=9.0.0",
+    "mkdocstrings[python]>=0.20.0",
+]
+
+[project.urls]
+Homepage = "https://github.com/ReGenNow/ReGenNexus"
+Documentation = "https://github.com/ReGenNow/ReGenNexus#readme"
+Repository = "https://github.com/ReGenNow/ReGenNexus.git"
+Issues = "https://github.com/ReGenNow/ReGenNexus/issues"
+Changelog = "https://github.com/ReGenNow/ReGenNexus/blob/main/CHANGELOG.md"
+
+[project.scripts]
+regen = "regennexus.cli:main"
+regennexus = "regennexus.cli:main"
+
+[tool.setuptools]
+packages = ["regennexus"]
+package-dir = {"" = "."}
+
+[tool.setuptools.packages.find]
+where = ["."]
+include = ["regennexus*"]
+
+[tool.setuptools.package-data]
+regennexus = ["py.typed"]
+
+[tool.black]
+line-length = 88
+target-version = ["py38", "py39", "py310", "py311", "py312"]
+include = '\.pyi?$'
+exclude = '''
+/(
+    \.git
+    | \.mypy_cache
+    | \.pytest_cache
+    | \.venv
+    | build
+    | dist
+)/
+'''
+
+[tool.isort]
+profile = "black"
+line_length = 88
+multi_line_output = 3
+include_trailing_comma = true
+force_grid_wrap = 0
+use_parentheses = true
+
+[tool.mypy]
+python_version = "3.8"
+warn_return_any = true
+warn_unused_configs = true
+ignore_missing_imports = true
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+asyncio_mode = "auto"
+testpaths = ["tests"]
+python_files = ["test_*.py"]
+python_functions = ["test_*"]
+addopts = "-v --tb=short"
+
+[tool.coverage.run]
+source = ["regennexus"]
+branch = true
+
+[tool.coverage.report]
+exclude_lines = [
+    "pragma: no cover",
+    "def __repr__",
+    "raise NotImplementedError",
+    "if TYPE_CHECKING:",
+]

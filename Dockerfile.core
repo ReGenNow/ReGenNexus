@@ -3,10 +3,10 @@ FROM python:3.10-slim
 WORKDIR /app
 
 # Copy core protocol files
-COPY src/protocol /app/regennexus/protocol
-COPY src/registry /app/regennexus/registry
-COPY src/context /app/regennexus/context
-COPY src/security /app/regennexus/security
+COPY regennexus/protocol /app/regennexus/protocol
+COPY regennexus/registry /app/regennexus/registry
+COPY regennexus/context /app/regennexus/context
+COPY regennexus/security /app/regennexus/security
 
 # Copy setup files
 COPY setup.py /app/

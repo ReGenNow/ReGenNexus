@@ -1,0 +1,28 @@
+Panels:
+  - Class: rviz/Displays
+    Name: Displays
+Visualization Manager:
+  Class: rviz/VisualizationManager
+  Displays:
+    - Name: Grid
+      Class: rviz/Grid
+      Enabled: true
+      Value:
+        Plane Cell Count: 10
+        Color: [0.5, 0.5, 0.5]
+    - Name: TF
+      Class: rviz/TF
+      Enabled: true
+    - Name: Robot Model
+      Class: rviz/RobotModel
+      Enabled: true
+      Value:
+        Robot Description: robot_description
+    - Name: Joint States
+      Class: rviz/JointState
+      Enabled: true
+      Value:
+        Topic: /joint_states
+Global Options:
+  Fixed Frame: base_link
+  Frame Rate: 30

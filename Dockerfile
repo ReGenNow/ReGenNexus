@@ -36,4 +36,4 @@ RUN useradd -m regennexus
 USER regennexus
 
 # Command to run the application
-CMD ["python", "-m", "regennexus.server"]
+CMD ["regennexus-registry"]
