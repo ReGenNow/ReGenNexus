@@ -10,9 +10,10 @@ with each other using the ReGenNexus UAP core protocol. This example shows:
 """
 
 import asyncio
-from regennexus.protocol.protocol_core import Message, Entity, Intent
-from regennexus.registry.registry import Registry
-from regennexus.context.context_manager import ContextManager
+from regennexus.core.protocol import RegenNexus
+from regennexus.core.message import Message, Entity, Intent
+from regennexus.core.registry import get_registry
+# ContextManager not available
 
 # Define different entity types
 class SensorEntity(Entity):

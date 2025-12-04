@@ -19,10 +19,10 @@ logging.basicConfig(level=logging.INFO,
 logger = logging.getLogger(__name__)
 
 # Import ReGenNexus Core modules
-sys.path.append(os.path.abspath(os.path.join(os.path.dirname(__file__), '../../')))
-from src.bridges.ros_bridge import ROS2Bridge
-from src.protocol.protocol_core import UAP_Protocol
-from src.registry.registry import Registry
+
+from regennexus.bridges.ros_bridge import ROSBridge
+from regennexus.core.protocol import RegenNexus, get_registry
+from regennexus.core.entity import Entity
 
 async def main():
     """Main function to demonstrate ROS 2 integration."""
@@ -39,7 +39,7 @@ async def main():
     logger.info("Protocol initialized")
     
     # Initialize ROS 2 bridge
-    ros_bridge = ROS2Bridge(protocol=protocol)
+    ros_bridge = ROSBridge(protocol=protocol)
     await ros_bridge.initialize()
     logger.info("ROS 2 bridge initialized")
     

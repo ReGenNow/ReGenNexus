@@ -16,7 +16,7 @@ import logging
 import random
 import time
 import json
-from regennexus.protocol.client import UAP_Client
+# UAP_Client not available - this example needs updating for new API
 
 # Configure logging
 logging.basicConfig(level=logging.INFO)

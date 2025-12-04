@@ -10,7 +10,8 @@ without any LLM integration or advanced features. It shows how to:
 """
 
 import asyncio
-from protocol.protocol_core import Message, Entity
+from regennexus.core.message import Message
+from regennexus.core.entity import Entity
 
 # Simple context store (in-memory for demo)
 context_store = {}

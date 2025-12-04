@@ -15,8 +15,8 @@ import asyncio
 import logging
 import json
 import time
-from regennexus.protocol.client import UAP_Client
-from regennexus.plugins.esp32 import ESP32Plugin
+# UAP_Client not available - this example needs updating for new API
+# ESP32Plugin not available - example for ESP32 MicroPython
 from regennexus.bridges.azure_bridge import AzureBridge
 
 # Configure logging

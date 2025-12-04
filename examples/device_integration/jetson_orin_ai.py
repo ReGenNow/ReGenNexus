@@ -23,8 +23,8 @@ import os
 import threading
 
 # ReGenNexus imports
-from regennexus.protocol.client import UAP_Client
-from regennexus.protocol.message import UAP_Message
+# UAP_Client not available - this example needs updating for new API
+from regennexus.core.message import Message
 from regennexus.plugins.jetson import JetsonPlugin
 
 # Check if TensorRT is available

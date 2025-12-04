@@ -10,9 +10,10 @@ without any LLM integration or advanced features. It shows how to:
 """
 
 import asyncio
-from regennexus.protocol.protocol_core import Message, Entity, Intent
-from regennexus.registry.registry import Registry
-from regennexus.context.context_manager import ContextManager
+from regennexus.core.message import Message, Intent
+from regennexus.core.entity import Entity
+from regennexus.core.registry import get_registry
+# ContextManager not needed - removed
 
 # Create a simple entity class
 class SimpleEntity(Entity):

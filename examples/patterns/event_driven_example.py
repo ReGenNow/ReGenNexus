@@ -15,9 +15,10 @@ without requiring LLM integration.
 import asyncio
 import json
 import random
-from regennexus.protocol.protocol_core import Message, Entity, Intent
-from regennexus.registry.registry import Registry
-from regennexus.context.context_manager import ContextManager
+from regennexus.core.protocol import RegenNexus
+from regennexus.core.message import Message, Entity, Intent
+from regennexus.core.registry import get_registry
+# ContextManager not available - using basic pattern
 
 # Event topics we'll use in this example
 TOPICS = [

@@ -21,8 +21,8 @@ from datetime import datetime
 import logging
 
 # ReGenNexus imports
-from regennexus.protocol.client import UAP_Client
-from regennexus.protocol.message import UAP_Message
+# UAP_Client not available - this example needs updating for new API
+from regennexus.core.message import Message
 
 # Set up logging
 logging.basicConfig(level=logging.INFO, 
