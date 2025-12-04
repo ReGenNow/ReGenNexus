@@ -136,7 +136,7 @@ class MCPServer:
     def __init__(
         self,
         name: str = "regennexus-hardware",
-        version: str = "0.2.0",
+        version: str = "0.2.5",
     ):
         """
         Initialize MCP server.
@@ -343,7 +343,7 @@ class MCPServer:
             "jsonrpc": "2.0",
             "id": msg_id,
             "result": {
-                "protocolVersion": "2024-11-05",
+                "protocolVersion": "2025-06-18",
                 "capabilities": {
                     "tools": {},
                     "resources": {"subscribe": True},

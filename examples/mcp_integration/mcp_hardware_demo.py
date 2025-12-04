@@ -149,7 +149,7 @@ async def list_devices_handler(args):
 
 def create_demo_server():
     """Create MCP server with demo handlers."""
-    server = MCPServer(name="regennexus-demo", version="0.2.0")
+    server = MCPServer(name="regennexus-demo", version="0.2.5")
 
     # Register tools with handlers
     server.register_tool(MCPTool(
