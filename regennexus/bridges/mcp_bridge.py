@@ -274,13 +274,32 @@ class MCPServer:
             message: MCP JSON-RPC message
 
         Returns:
-            Response message or None
+            Response message or None (for notifications)
         """
         method = message.get("method", "")
         params = message.get("params", {})
         msg_id = message.get("id")
 
+        # MCP notifications don't have an id - don't respond to them
+        # Per JSON-RPC 2.0 spec: notifications have no id field
+        is_notification = "id" not in message
+
         try:
+            # Handle notifications (no response expected)
+            if method == "notifications/initialized":
+                logger.info("Client initialized notification received")
+                return None  # Don't respond to notifications
+
+            if method == "notifications/cancelled":
+                logger.info("Request cancelled notification received")
+                return None
+
+            # If it's a notification we don't recognize, just ignore it
+            if is_notification:
+                logger.debug(f"Ignoring unknown notification: {method}")
+                return None
+
+            # Handle requests (response expected)
             if method == "initialize":
                 return await self._handle_initialize(msg_id, params)
 
@@ -302,11 +321,18 @@ class MCPServer:
             elif method == "prompts/get":
                 return await self._handle_get_prompt(msg_id, params)
 
+            # Handle ping for keepalive
+            elif method == "ping":
+                return {"jsonrpc": "2.0", "id": msg_id, "result": {}}
+
             else:
-                return self._error_response(msg_id, -32601, f"Unknown method: {method}")
+                logger.warning(f"Unknown method: {method}")
+                return self._error_response(msg_id, -32601, f"Method not found: {method}")
 
         except Exception as e:
             logger.error(f"Error handling {method}: {e}")
+            if is_notification:
+                return None  # Don't respond to failed notifications
             return self._error_response(msg_id, -32603, str(e))
 
     async def _handle_initialize(self, msg_id: Any, params: Dict) -> Dict:
