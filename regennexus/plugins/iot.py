@@ -25,13 +25,17 @@ except ImportError:
     HAS_AIOHTTP = False
     aiohttp = None
 
-# Try to import MQTT client
+# Try to import MQTT client (library was renamed from asyncio_mqtt to aiomqtt)
 try:
-    import asyncio_mqtt
+    import aiomqtt as asyncio_mqtt
     HAS_MQTT = True
 except ImportError:
-    HAS_MQTT = False
-    asyncio_mqtt = None
+    try:
+        import asyncio_mqtt
+        HAS_MQTT = True
+    except ImportError:
+        HAS_MQTT = False
+        asyncio_mqtt = None
 
 
 class IoTPlugin(DevicePlugin, MockDeviceMixin):
