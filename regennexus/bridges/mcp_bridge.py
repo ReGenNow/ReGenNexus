@@ -474,39 +474,87 @@ class MCPServer:
 
         This is the standard way to run an MCP server that can be
         configured in Claude Desktop's settings.
+
+        Uses thread-based I/O for Windows compatibility.
         """
         logger.info("Starting MCP server on stdio")
 
-        reader = asyncio.StreamReader()
-        protocol = asyncio.StreamReaderProtocol(reader)
-        await asyncio.get_event_loop().connect_read_pipe(
-            lambda: protocol, sys.stdin
-        )
+        import threading
+        import queue
 
-        writer_transport, writer_protocol = await asyncio.get_event_loop().connect_write_pipe(
-            asyncio.streams.FlowControlMixin, sys.stdout
-        )
-        writer = asyncio.StreamWriter(writer_transport, writer_protocol, None, asyncio.get_event_loop())
+        # Use thread-based stdin reading for Windows compatibility
+        input_queue: queue.Queue = queue.Queue()
+        stop_event = threading.Event()
 
-        while True:
+        def stdin_reader():
+            """Read stdin in a separate thread (Windows compatible)."""
             try:
-                line = await reader.readline()
-                if not line:
-                    break
+                # Set stdin to binary mode on Windows
+                if sys.platform == 'win32':
+                    import msvcrt
+                    msvcrt.setmode(sys.stdin.fileno(), 0)  # O_BINARY = 0
 
-                message = json.loads(line.decode('utf-8'))
-                response = await self.handle_message(message)
-
-                if response:
-                    response_line = json.dumps(response) + "\n"
-                    writer.write(response_line.encode('utf-8'))
-                    await writer.drain()
-
-            except json.JSONDecodeError:
-                continue
+                while not stop_event.is_set():
+                    try:
+                        line = sys.stdin.readline()
+                        if line:
+                            input_queue.put(line)
+                        elif line == '':
+                            # EOF
+                            input_queue.put(None)
+                            break
+                    except Exception as e:
+                        logger.error(f"Stdin read error: {e}")
+                        input_queue.put(None)
+                        break
             except Exception as e:
-                logger.error(f"Stdio error: {e}")
-                break
+                logger.error(f"Stdin reader thread error: {e}")
+                input_queue.put(None)
+
+        # Start stdin reader thread
+        reader_thread = threading.Thread(target=stdin_reader, daemon=True)
+        reader_thread.start()
+
+        # Set stdout to binary mode on Windows for consistent output
+        if sys.platform == 'win32':
+            import msvcrt
+            msvcrt.setmode(sys.stdout.fileno(), 0)  # O_BINARY = 0
+
+        try:
+            while True:
+                try:
+                    # Check for input with timeout to allow clean shutdown
+                    try:
+                        line = await asyncio.get_event_loop().run_in_executor(
+                            None, lambda: input_queue.get(timeout=0.1)
+                        )
+                    except queue.Empty:
+                        continue
+
+                    if line is None:
+                        # EOF received
+                        break
+
+                    line = line.strip()
+                    if not line:
+                        continue
+
+                    message = json.loads(line)
+                    response = await self.handle_message(message)
+
+                    if response:
+                        response_line = json.dumps(response) + "\n"
+                        sys.stdout.write(response_line)
+                        sys.stdout.flush()
+
+                except json.JSONDecodeError as e:
+                    logger.debug(f"JSON decode error: {e}")
+                    continue
+                except Exception as e:
+                    logger.error(f"Stdio error: {e}")
+                    break
+        finally:
+            stop_event.set()
 
     async def run_websocket(self, host: str = "0.0.0.0", port: int = 8765) -> None:
         """
