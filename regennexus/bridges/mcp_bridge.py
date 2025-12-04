@@ -489,10 +489,13 @@ class MCPServer:
         def stdin_reader():
             """Read stdin in a separate thread (Windows compatible)."""
             try:
-                # Set stdin to binary mode on Windows
+                # Try to set stdin to binary mode on Windows (may fail with IPC)
                 if sys.platform == 'win32':
-                    import msvcrt
-                    msvcrt.setmode(sys.stdin.fileno(), 0)  # O_BINARY = 0
+                    try:
+                        import msvcrt
+                        msvcrt.setmode(sys.stdin.fileno(), 0)  # O_BINARY = 0
+                    except OSError:
+                        pass  # Skip if handle doesn't support binary mode
 
                 while not stop_event.is_set():
                     try:
@@ -515,10 +518,13 @@ class MCPServer:
         reader_thread = threading.Thread(target=stdin_reader, daemon=True)
         reader_thread.start()
 
-        # Set stdout to binary mode on Windows for consistent output
+        # Try to set stdout to binary mode on Windows (may fail with IPC)
         if sys.platform == 'win32':
-            import msvcrt
-            msvcrt.setmode(sys.stdout.fileno(), 0)  # O_BINARY = 0
+            try:
+                import msvcrt
+                msvcrt.setmode(sys.stdout.fileno(), 0)  # O_BINARY = 0
+            except OSError:
+                pass  # Skip if handle doesn't support binary mode
 
         try:
             while True:
