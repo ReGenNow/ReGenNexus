@@ -33,8 +33,8 @@ elif sys.platform == "win32":
     DEFAULT_LOG_FILE = Path(os.environ.get("APPDATA", "")) / "RegenNexus/mesh.log"
     DEFAULT_CONFIG_FILE = Path(os.environ.get("APPDATA", "")) / "RegenNexus/mesh.yaml"
 else:  # Linux and others
-    DEFAULT_PID_FILE = Path("/var/run/regennexus/mesh.pid")
-    DEFAULT_LOG_FILE = Path("/var/log/regennexus/mesh.log")
+    DEFAULT_PID_FILE = Path.home() / ".local/share/regennexus/mesh.pid"
+    DEFAULT_LOG_FILE = Path.home() / ".local/share/regennexus/mesh.log"
     DEFAULT_CONFIG_FILE = Path.home() / ".config/regennexus/mesh.yaml"
 
 
