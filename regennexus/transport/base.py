@@ -43,6 +43,12 @@ class TransportConfig:
     """Configuration for a transport."""
 
     type: TransportType = TransportType.AUTO
+    
+    # Transport enable flags (add these)
+    udp_enabled: bool = True
+    websocket_enabled: bool = True
+    ipc_enabled: bool = True
+
 
     # IPC settings
     ipc_socket_path: str = "/tmp/regennexus.sock"

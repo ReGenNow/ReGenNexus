@@ -162,7 +162,7 @@ class MeshNetwork:
                 udp_multicast_group=self.config.udp_multicast_group,
                 udp_broadcast_interval=self.config.discovery_interval,
                 websocket_enabled=self.config.websocket_enabled,
-                websocket_port=self.config.websocket_port,
+                ws_port=self.config.websocket_port,
                 ipc_enabled=self.config.ipc_enabled,
             )
 

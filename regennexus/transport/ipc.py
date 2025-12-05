@@ -197,7 +197,7 @@ class IPCTransport(Transport):
             data = await self._read_message(reader)
             if data:
                 msg = Message.from_dict(json.loads(data))
-                peer_id = msg.source
+                peer_id = msg.sender_id
                 self._clients[peer_id] = writer
                 self._connected_peers.add(peer_id)
                 logger.debug(f"IPC client connected: {peer_id}")

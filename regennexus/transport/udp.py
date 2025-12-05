@@ -4,6 +4,11 @@ RegenNexus UAP - UDP Transport
 UDP multicast for LAN discovery and fast local messaging (1-5ms).
 Ideal for device discovery on the same network.
 
+Fallback chain:
+1. Multicast (239.255.255.250) - standard LAN discovery
+2. Broadcast (255.255.255.255) - works when multicast blocked
+3. Direct peers (known_peers) - works across subnets
+
 Copyright (c) 2024-2025 ReGen Designs LLC
 """
 
@@ -13,7 +18,7 @@ import socket
 import struct
 import time
 import logging
-from typing import Dict, Optional, Tuple
+from typing import Dict, List, Optional, Tuple
 
 from regennexus.core.message import Message
 from regennexus.transport.base import (
@@ -57,13 +62,15 @@ class UDPTransport(Transport):
     """
     UDP Transport for LAN communication.
 
-    Uses multicast for device discovery and direct UDP for
-    point-to-point messaging. Latency is typically 1-5ms.
+    Uses multiple discovery methods simultaneously:
+    - Multicast for standard LAN discovery
+    - Broadcast as fallback when multicast is blocked
+    - Direct peer IPs for cross-subnet discovery
 
     Features:
-    - Multicast discovery
-    - Broadcast messaging
-    - Low latency
+    - Multi-method discovery (multicast + broadcast + direct)
+    - Automatic fallback
+    - Low latency (1-5ms)
     - No connection overhead
     """
 
@@ -74,6 +81,50 @@ class UDPTransport(Transport):
         self._peers: Dict[str, Tuple[str, int]] = {}  # peer_id -> (host, port)
         self._discovery_task: Optional[asyncio.Task] = None
         self._local_id: Optional[str] = None
+        
+        # Discovery method flags
+        self._multicast_enabled: bool = True
+        self._broadcast_enabled: bool = True
+        self._direct_peers_enabled: bool = True
+        
+        # Known peers for direct discovery (list of "host:port" or just "host")
+        self._known_peers: List[Tuple[str, int]] = []
+        
+        # Track which methods are working
+        self._multicast_working: bool = False
+        self._broadcast_working: bool = False
+
+    def add_known_peer(self, host: str, port: Optional[int] = None) -> None:
+        """
+        Add a known peer IP for direct discovery.
+        
+        Args:
+            host: Peer IP address
+            port: Peer port (uses config port if not specified)
+        """
+        peer_port = port or self.config.udp_port
+        peer_addr = (host, peer_port)
+        if peer_addr not in self._known_peers:
+            self._known_peers.append(peer_addr)
+            logger.debug(f"Added known peer: {host}:{peer_port}")
+
+    def set_discovery_methods(
+        self,
+        multicast: bool = True,
+        broadcast: bool = True,
+        direct_peers: bool = True
+    ) -> None:
+        """
+        Enable/disable discovery methods.
+        
+        Args:
+            multicast: Enable multicast discovery
+            broadcast: Enable broadcast discovery
+            direct_peers: Enable direct peer discovery
+        """
+        self._multicast_enabled = multicast
+        self._broadcast_enabled = broadcast
+        self._direct_peers_enabled = direct_peers
 
     async def connect(self) -> bool:
         """
@@ -104,13 +155,18 @@ class UDPTransport(Transport):
                 # Bind to port
                 sock.bind(("", self.config.udp_port))
 
-                # Join multicast group
-                group = socket.inet_aton(self.config.udp_multicast_group)
-                mreq = struct.pack("4sL", group, socket.INADDR_ANY)
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
-
-                # Set multicast TTL (1 = local network only)
-                sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+                # Try to join multicast group (may fail on some networks)
+                if self._multicast_enabled:
+                    try:
+                        group = socket.inet_aton(self.config.udp_multicast_group)
+                        mreq = struct.pack("4sL", group, socket.INADDR_ANY)
+                        sock.setsockopt(socket.IPPROTO_IP, socket.IP_ADD_MEMBERSHIP, mreq)
+                        sock.setsockopt(socket.IPPROTO_IP, socket.IP_MULTICAST_TTL, 1)
+                        self._multicast_working = True
+                        logger.debug("Multicast enabled")
+                    except Exception as e:
+                        logger.warning(f"Multicast setup failed (will use broadcast): {e}")
+                        self._multicast_working = False
 
                 # Create asyncio transport
                 self._transport, self._protocol = await loop.create_datagram_endpoint(
@@ -124,9 +180,17 @@ class UDPTransport(Transport):
                 # Start discovery broadcast
                 self._discovery_task = asyncio.create_task(self._discovery_loop())
 
+                methods = []
+                if self._multicast_enabled:
+                    methods.append(f"multicast({self.config.udp_multicast_group})")
+                if self._broadcast_enabled:
+                    methods.append("broadcast")
+                if self._direct_peers_enabled and self._known_peers:
+                    methods.append(f"direct({len(self._known_peers)} peers)")
+
                 logger.info(
                     f"UDP transport started on port {self.config.udp_port}, "
-                    f"multicast group {self.config.udp_multicast_group}"
+                    f"discovery: {', '.join(methods) or 'none'}"
                 )
                 return True
 
@@ -161,10 +225,10 @@ class UDPTransport(Transport):
             logger.info("UDP transport stopped")
 
     async def _discovery_loop(self) -> None:
-        """Periodically broadcast discovery messages."""
+        """Periodically broadcast discovery messages via all methods."""
         try:
             while self._state == TransportState.CONNECTED:
-                # Send discovery announcement
+                # Send discovery announcement via all enabled methods
                 if self._local_id:
                     await self._send_discovery()
 
@@ -176,7 +240,7 @@ class UDPTransport(Transport):
             logger.error(f"Discovery loop error: {e}")
 
     async def _send_discovery(self) -> None:
-        """Send discovery announcement."""
+        """Send discovery announcement via all enabled methods."""
         if not self._transport or not self._local_id:
             return
 
@@ -187,12 +251,34 @@ class UDPTransport(Transport):
         }
 
         data = json.dumps(discovery_msg).encode("utf-8")
-        addr = (self.config.udp_multicast_group, self.config.udp_port)
 
-        try:
-            self._transport.sendto(data, addr)
-        except Exception as e:
-            logger.error(f"Discovery send error: {e}")
+        # Method 1: Multicast
+        if self._multicast_enabled and self._multicast_working:
+            try:
+                addr = (self.config.udp_multicast_group, self.config.udp_port)
+                self._transport.sendto(data, addr)
+                logger.debug(f"Discovery sent via multicast to {addr}")
+            except Exception as e:
+                logger.debug(f"Multicast send failed: {e}")
+                self._multicast_working = False
+
+        # Method 2: Broadcast (255.255.255.255)
+        if self._broadcast_enabled:
+            try:
+                addr = ("255.255.255.255", self.config.udp_port)
+                self._transport.sendto(data, addr)
+                logger.debug(f"Discovery sent via broadcast to {addr}")
+            except Exception as e:
+                logger.debug(f"Broadcast send failed: {e}")
+
+        # Method 3: Direct peers
+        if self._direct_peers_enabled and self._known_peers:
+            for peer_addr in self._known_peers:
+                try:
+                    self._transport.sendto(data, peer_addr)
+                    logger.debug(f"Discovery sent directly to {peer_addr}")
+                except Exception as e:
+                    logger.debug(f"Direct send to {peer_addr} failed: {e}")
 
     async def _handle_datagram(
         self,
@@ -214,8 +300,14 @@ class UDPTransport(Transport):
             if payload.get("type") == "discovery":
                 peer_id = payload.get("id")
                 if peer_id and peer_id != self._local_id:
+                    # Add to known peers for direct communication
                     self._peers[peer_id] = addr
                     self._connected_peers.add(peer_id)
+                    
+                    # Also add to known_peers list for future direct discovery
+                    if addr not in self._known_peers:
+                        self._known_peers.append(addr)
+                    
                     logger.debug(f"Discovered peer: {peer_id} at {addr}")
                 return
 
@@ -223,9 +315,13 @@ class UDPTransport(Transport):
             msg = Message.from_dict(payload)
 
             # Update peer info
-            if msg.source:
-                self._peers[msg.source] = addr
-                self._connected_peers.add(msg.source)
+            if msg.sender_id:
+                self._peers[msg.sender_id] = addr
+                self._connected_peers.add(msg.sender_id)
+                
+                # Auto-add to known peers
+                if addr not in self._known_peers:
+                    self._known_peers.append(addr)
 
             self._update_receive_stats(len(data))
             await self._dispatch_message(msg)
@@ -272,9 +368,38 @@ class UDPTransport(Transport):
                     logger.warning(f"Unknown peer: {target}")
                     return False
             else:
-                # Send to multicast group
-                addr = (self.config.udp_multicast_group, self.config.udp_port)
-                self._transport.sendto(data, addr)
+                # Broadcast via all methods
+                sent = False
+                
+                # Multicast
+                if self._multicast_enabled and self._multicast_working:
+                    try:
+                        addr = (self.config.udp_multicast_group, self.config.udp_port)
+                        self._transport.sendto(data, addr)
+                        sent = True
+                    except Exception as e:
+                        logger.debug(f"Multicast send failed: {e}")
+                
+                # Broadcast
+                if self._broadcast_enabled:
+                    try:
+                        addr = ("255.255.255.255", self.config.udp_port)
+                        self._transport.sendto(data, addr)
+                        sent = True
+                    except Exception as e:
+                        logger.debug(f"Broadcast send failed: {e}")
+                
+                # Direct to all known peers
+                if self._direct_peers_enabled:
+                    for peer_addr in self._known_peers:
+                        try:
+                            self._transport.sendto(data, peer_addr)
+                            sent = True
+                        except Exception:
+                            pass
+                
+                if not sent:
+                    return False
 
             self._update_send_stats(len(data))
             self._record_latency(time.time() - start_time)
@@ -287,7 +412,7 @@ class UDPTransport(Transport):
 
     async def broadcast(self, message: Message) -> int:
         """
-        Broadcast message to all peers via multicast.
+        Broadcast message to all peers via all methods.
 
         Args:
             message: Message to broadcast

@@ -271,6 +271,13 @@ class AutoTransport(Transport):
             if preferred in self._transports:
                 return self._transports[preferred]
 
+        # Check which transport actually knows this peer
+        if target:
+            for ttype, transport in self._transports.items():
+                if target in transport.peers:
+                    self._peer_transports[target] = ttype
+                    return transport
+
         # Determine best transport type
         best_type = select_best_transport(
             target,

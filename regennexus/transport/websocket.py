@@ -208,12 +208,12 @@ class WebSocketTransport(Transport):
                     msg = Message.from_dict(data)
 
                     # Track peer
-                    if msg.source:
-                        if msg.source not in self._clients:
-                            self._clients[msg.source] = websocket
-                            self._connected_peers.add(msg.source)
-                            logger.debug(f"WebSocket client connected: {msg.source}")
-                        peer_id = msg.source
+                    if msg.sender_id:
+                        if msg.sender_id not in self._clients:
+                            self._clients[msg.sender_id] = websocket
+                            self._connected_peers.add(msg.sender_id)
+                            logger.debug(f"WebSocket client connected: {msg.sender_id}")
+                        peer_id = msg.sender_id
 
                     self._update_receive_stats(len(raw_message))
 
