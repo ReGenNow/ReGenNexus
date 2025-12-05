@@ -169,6 +169,10 @@ class MeshNetwork:
             # Create and connect transport
             self._transport = AutoTransport(transport_config)
             self._transport.set_local_id(self.node_id)
+            self._transport.set_local_info({
+                "entity_type": self.config.entity_type,
+                "capabilities": self.config.capabilities,
+            })
             self._transport.add_handler(self._handle_message)
 
             if not await self._transport.connect():
@@ -341,6 +345,15 @@ class MeshNetwork:
             if is_new:
                 logger.info(f"Discovered peer: {node_id} ({peer.entity_type})")
 
+                # Auto-connect via WebSocket if ws_url is provided (plug-and-play)
+                ws_url = content.get("ws_url")
+                if ws_url and self._transport:
+                    # Check if we're not already connected via WebSocket
+                    ws_transport = self._transport._transports.get(TransportType.WEBSOCKET)
+                    if ws_transport and node_id not in ws_transport.peers:
+                        logger.info(f"Auto-connecting to peer WebSocket: {ws_url}")
+                        asyncio.create_task(self._auto_connect_websocket(ws_url, node_id))
+
                 # Notify handlers
                 for handler in self._peer_handlers:
                     try:
@@ -349,6 +362,24 @@ class MeshNetwork:
                             await result
                     except Exception as e:
                         logger.error(f"Peer handler error: {e}")
+
+    async def _auto_connect_websocket(self, ws_url: str, peer_id: str) -> None:
+        """
+        Auto-connect to a peer's WebSocket for plug-and-play connectivity.
+
+        Args:
+            ws_url: WebSocket URL (ws://host:port)
+            peer_id: Peer's node ID
+        """
+        try:
+            if self._transport:
+                success = await self._transport.connect_to_peer(ws_url)
+                if success:
+                    logger.info(f"Auto-connected to {peer_id} via WebSocket: {ws_url}")
+                else:
+                    logger.debug(f"Could not auto-connect to {peer_id} via WebSocket")
+        except Exception as e:
+            logger.debug(f"Auto-connect to {peer_id} failed: {e}")
 
     async def _handle_goodbye(self, message: Message) -> None:
         """Handle peer leaving."""

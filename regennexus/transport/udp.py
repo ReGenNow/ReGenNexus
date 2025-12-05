@@ -5,9 +5,10 @@ UDP multicast for LAN discovery and fast local messaging (1-5ms).
 Ideal for device discovery on the same network.
 
 Fallback chain:
-1. Multicast (239.255.255.250) - standard LAN discovery
-2. Broadcast (255.255.255.255) - works when multicast blocked
-3. Direct peers (known_peers) - works across subnets
+1. mDNS/Zeroconf - works on mesh routers (plug-and-play)
+2. Multicast (239.255.255.250) - standard LAN discovery
+3. Broadcast (255.255.255.255) - works when multicast blocked
+4. Direct peers (known_peers) - works across subnets
 
 Copyright (c) 2024-2025 ReGen Designs LLC
 """
@@ -28,6 +29,115 @@ from regennexus.transport.base import (
 )
 
 logger = logging.getLogger(__name__)
+
+# mDNS/Zeroconf support (optional dependency)
+try:
+    from zeroconf import ServiceInfo, ServiceBrowser
+    from zeroconf.asyncio import AsyncZeroconf, AsyncServiceBrowser
+    ZEROCONF_AVAILABLE = True
+except ImportError:
+    ZEROCONF_AVAILABLE = False
+    logger.debug("zeroconf not installed - mDNS discovery disabled")
+
+
+# mDNS service type for RegenNexus
+MDNS_SERVICE_TYPE = "_regennexus._udp.local."
+
+
+class RegenNexusServiceListener:
+    """Listener for mDNS service discovery."""
+
+    def __init__(self, transport: "UDPTransport"):
+        self.transport = transport
+
+    def add_service(self, zc: "Zeroconf", service_type: str, name: str) -> None:
+        """Called when a service is discovered."""
+        asyncio.create_task(self._handle_service(zc, service_type, name, "add"))
+
+    def remove_service(self, zc: "Zeroconf", service_type: str, name: str) -> None:
+        """Called when a service is removed."""
+        asyncio.create_task(self._handle_service(zc, service_type, name, "remove"))
+
+    def update_service(self, zc: "Zeroconf", service_type: str, name: str) -> None:
+        """Called when a service is updated."""
+        asyncio.create_task(self._handle_service(zc, service_type, name, "update"))
+
+    async def _handle_service(self, zc: "Zeroconf", service_type: str, name: str, event: str) -> None:
+        """Handle service discovery event."""
+        try:
+            info = zc.get_service_info(service_type, name)
+            if info and info.addresses:
+                # Get peer info from mDNS
+                peer_id = info.properties.get(b"id", b"").decode("utf-8")
+                entity_type = info.properties.get(b"type", b"device").decode("utf-8")
+                if not peer_id or peer_id == self.transport._local_id:
+                    return
+
+                # Get IP address
+                ip = socket.inet_ntoa(info.addresses[0])
+                port = info.port
+                addr = (ip, port)
+
+                # Get WebSocket URL if available (for auto-connect)
+                ws_url = None
+                ws_port_bytes = info.properties.get(b"ws_port")
+                ws_url_bytes = info.properties.get(b"ws_url")
+                if ws_url_bytes:
+                    ws_url = ws_url_bytes.decode("utf-8")
+                elif ws_port_bytes:
+                    ws_port = ws_port_bytes.decode("utf-8")
+                    ws_url = f"ws://{ip}:{ws_port}"
+
+                if event in ("add", "update"):
+                    # Add peer
+                    self.transport._peers[peer_id] = addr
+                    self.transport._connected_peers.add(peer_id)
+                    if addr not in self.transport._known_peers:
+                        self.transport._known_peers.append(addr)
+                    logger.info(f"mDNS discovered peer: {peer_id} at {ip}:{port}" + (f" (ws: {ws_url})" if ws_url else ""))
+
+                    # Create synthetic announcement message to notify mesh layer
+                    # Include WebSocket URL so mesh can auto-connect
+                    import time
+                    announce_msg = Message(
+                        sender_id=peer_id,
+                        recipient_id="*",
+                        intent="mesh.announce",
+                        content={
+                            "node_id": peer_id,
+                            "entity_type": entity_type,
+                            "capabilities": [],
+                            "timestamp": time.time(),
+                            "discovery": "mdns",
+                            "ws_url": ws_url,  # Include WebSocket URL for auto-connect
+                            "ip": ip,
+                            "udp_port": port,
+                        },
+                    )
+                    # Dispatch to handlers so mesh layer knows about this peer
+                    await self.transport._dispatch_message(announce_msg)
+
+                elif event == "remove":
+                    # Remove peer
+                    self.transport._peers.pop(peer_id, None)
+                    self.transport._connected_peers.discard(peer_id)
+                    logger.info(f"mDNS peer removed: {peer_id}")
+
+                    # Create synthetic goodbye message
+                    import time
+                    goodbye_msg = Message(
+                        sender_id=peer_id,
+                        recipient_id="*",
+                        intent="mesh.goodbye",
+                        content={
+                            "node_id": peer_id,
+                            "timestamp": time.time(),
+                        },
+                    )
+                    await self.transport._dispatch_message(goodbye_msg)
+
+        except Exception as e:
+            logger.debug(f"mDNS service handling error: {e}")
 
 
 class UDPProtocol(asyncio.DatagramProtocol):
@@ -81,18 +191,29 @@ class UDPTransport(Transport):
         self._peers: Dict[str, Tuple[str, int]] = {}  # peer_id -> (host, port)
         self._discovery_task: Optional[asyncio.Task] = None
         self._local_id: Optional[str] = None
-        
+        self._local_info: Dict = {}  # Info to share via mDNS (ws_port, etc.)
+        self._bound_port: int = 0  # Actual port bound (after auto-detect)
+
         # Discovery method flags
+        self._mdns_enabled: bool = True  # mDNS is preferred method
         self._multicast_enabled: bool = True
         self._broadcast_enabled: bool = True
         self._direct_peers_enabled: bool = True
-        
+
         # Known peers for direct discovery (list of "host:port" or just "host")
         self._known_peers: List[Tuple[str, int]] = []
-        
+
         # Track which methods are working
+        self._mdns_working: bool = False
         self._multicast_working: bool = False
         self._broadcast_working: bool = False
+
+        # mDNS/Zeroconf instances
+        self._async_zeroconf: Optional["AsyncZeroconf"] = None
+        self._zeroconf = None  # Reference to sync zeroconf from AsyncZeroconf
+        self._mdns_service_info: Optional["ServiceInfo"] = None
+        self._mdns_browser: Optional["AsyncServiceBrowser"] = None
+        self._mdns_listener: Optional["RegenNexusServiceListener"] = None
 
     def add_known_peer(self, host: str, port: Optional[int] = None) -> None:
         """
@@ -131,7 +252,7 @@ class UDPTransport(Transport):
         Start UDP transport.
 
         Creates a UDP socket and joins the multicast group
-        for discovery.
+        for discovery. Auto-detects available port if default is busy.
 
         Returns:
             True if started successfully
@@ -152,8 +273,27 @@ class UDPTransport(Transport):
                 # Enable broadcast
                 sock.setsockopt(socket.SOL_SOCKET, socket.SO_BROADCAST, 1)
 
-                # Bind to port
-                sock.bind(("", self.config.udp_port))
+                # Try to bind to configured port, fall back to auto-detect
+                bound_port = self.config.udp_port
+                try:
+                    sock.bind(("", self.config.udp_port))
+                except OSError as e:
+                    logger.warning(f"Port {self.config.udp_port} busy, auto-detecting...")
+                    # Find available port in range
+                    port_range = getattr(self.config, 'udp_port_range', (5454, 5500))
+                    for port in range(port_range[0], port_range[1] + 1):
+                        try:
+                            sock.bind(("", port))
+                            bound_port = port
+                            logger.info(f"Auto-selected UDP port: {bound_port}")
+                            break
+                        except OSError:
+                            continue
+                    else:
+                        raise OSError(f"No available UDP port in range {port_range}")
+
+                # Store the actual bound port for mDNS and peer discovery
+                self._bound_port = bound_port
 
                 # Try to join multicast group (may fail on some networks)
                 if self._multicast_enabled:
@@ -180,7 +320,13 @@ class UDPTransport(Transport):
                 # Start discovery broadcast
                 self._discovery_task = asyncio.create_task(self._discovery_loop())
 
+                # Start mDNS discovery (runs in background)
+                if self._mdns_enabled:
+                    await self._start_mdns()
+
                 methods = []
+                if self._mdns_enabled and self._mdns_working:
+                    methods.append("mDNS")
                 if self._multicast_enabled:
                     methods.append(f"multicast({self.config.udp_multicast_group})")
                 if self._broadcast_enabled:
@@ -189,7 +335,7 @@ class UDPTransport(Transport):
                     methods.append(f"direct({len(self._known_peers)} peers)")
 
                 logger.info(
-                    f"UDP transport started on port {self.config.udp_port}, "
+                    f"UDP transport started on port {self._bound_port}, "
                     f"discovery: {', '.join(methods) or 'none'}"
                 )
                 return True
@@ -222,7 +368,128 @@ class UDPTransport(Transport):
             self._peers.clear()
             self._connected_peers.clear()
 
+            # Stop mDNS
+            await self._stop_mdns()
+
             logger.info("UDP transport stopped")
+
+    async def _start_mdns(self) -> None:
+        """Start mDNS service registration and discovery."""
+        if not ZEROCONF_AVAILABLE:
+            logger.debug("zeroconf not available - mDNS disabled")
+            return
+
+        if not self._local_id:
+            logger.debug("No local ID set - mDNS registration skipped")
+            return
+
+        try:
+            # Get local IP address
+            local_ip = self._get_local_ip()
+            if not local_ip:
+                logger.warning("Could not determine local IP - mDNS disabled")
+                return
+
+            # Create async Zeroconf instance
+            self._async_zeroconf = AsyncZeroconf()
+            self._zeroconf = self._async_zeroconf.zeroconf
+
+            # Create service info for registration
+            # Service name format: nodeid._regennexus._udp.local.
+            service_name = f"{self._local_id}.{MDNS_SERVICE_TYPE}"
+
+            # Build mDNS properties - include WebSocket port for auto-discovery
+            mdns_properties = {
+                "id": self._local_id.encode("utf-8"),
+                "type": getattr(self, "_entity_type", "device").encode("utf-8"),
+            }
+
+            # Add WebSocket port from local_info if available
+            ws_port = self._local_info.get("ws_port") or self.config.ws_port
+            if ws_port:
+                mdns_properties["ws_port"] = str(ws_port).encode("utf-8")
+                mdns_properties["ws_url"] = f"ws://{local_ip}:{ws_port}".encode("utf-8")
+
+            self._mdns_service_info = ServiceInfo(
+                MDNS_SERVICE_TYPE,
+                service_name,
+                addresses=[socket.inet_aton(local_ip)],
+                port=self._bound_port or self.config.udp_port,
+                properties=mdns_properties,
+                server=f"{self._local_id}.local.",
+            )
+
+            # Register our service (async)
+            await self._async_zeroconf.async_register_service(self._mdns_service_info)
+            logger.info(f"mDNS service registered: {service_name} at {local_ip}:{self._bound_port} (ws:{ws_port})")
+
+            # Start browsing for other services (async browser)
+            self._mdns_listener = RegenNexusServiceListener(self)
+            self._mdns_browser = AsyncServiceBrowser(
+                self._zeroconf,
+                MDNS_SERVICE_TYPE,
+                self._mdns_listener
+            )
+
+            self._mdns_working = True
+            logger.info("mDNS discovery started")
+
+        except Exception as e:
+            import traceback
+            logger.warning(f"mDNS setup failed: {type(e).__name__}: {e}")
+            logger.debug(f"mDNS traceback: {traceback.format_exc()}")
+            self._mdns_working = False
+            # Clean up on failure
+            await self._stop_mdns()
+
+    async def _stop_mdns(self) -> None:
+        """Stop mDNS service and cleanup."""
+        if not ZEROCONF_AVAILABLE:
+            return
+
+        try:
+            # Unregister service
+            if hasattr(self, '_async_zeroconf') and self._async_zeroconf and self._mdns_service_info:
+                await self._async_zeroconf.async_unregister_service(self._mdns_service_info)
+                logger.debug("mDNS service unregistered")
+
+            # Close browser
+            if self._mdns_browser:
+                await self._mdns_browser.async_cancel()
+                self._mdns_browser = None
+
+            # Close async zeroconf
+            if hasattr(self, '_async_zeroconf') and self._async_zeroconf:
+                await self._async_zeroconf.async_close()
+                self._async_zeroconf = None
+                self._zeroconf = None
+
+            self._mdns_service_info = None
+            self._mdns_working = False
+
+        except Exception as e:
+            logger.debug(f"mDNS cleanup error: {e}")
+
+    def _get_local_ip(self) -> Optional[str]:
+        """Get the local IP address for mDNS registration."""
+        try:
+            # Create a socket to determine the local IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.1)
+            try:
+                # Connect to a public IP (doesn't actually send data)
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+            finally:
+                s.close()
+            return local_ip
+        except Exception:
+            # Fallback: try to get from hostname
+            try:
+                hostname = socket.gethostname()
+                return socket.gethostbyname(hostname)
+            except Exception:
+                return None
 
     async def _discovery_loop(self) -> None:
         """Periodically broadcast discovery messages via all methods."""
@@ -340,6 +607,15 @@ class UDPTransport(Transport):
             entity_id: Local entity's ID
         """
         self._local_id = entity_id
+
+    def set_local_info(self, info: Dict) -> None:
+        """
+        Set local node info for mDNS announcements.
+
+        Args:
+            info: Dict with ws_port, entity_type, capabilities, etc.
+        """
+        self._local_info = info
 
     async def send(self, message: Message, target: Optional[str] = None) -> bool:
         """

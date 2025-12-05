@@ -145,6 +145,7 @@ class AutoTransport(Transport):
         self._transports: Dict[TransportType, Transport] = {}
         self._peer_transports: Dict[str, TransportType] = {}
         self._local_id: Optional[str] = None
+        self._local_info: Dict = {}
 
     async def connect(self) -> bool:
         """
@@ -163,22 +164,33 @@ class AutoTransport(Transport):
             transports_to_init = []
 
             # IPC transport
-            ipc = IPCTransport(self.config)
-            transports_to_init.append((TransportType.IPC, ipc))
+            if self.config.ipc_enabled:
+                ipc = IPCTransport(self.config)
+                transports_to_init.append((TransportType.IPC, ipc))
 
             # UDP transport
-            udp = UDPTransport(self.config)
-            transports_to_init.append((TransportType.UDP, udp))
+            if self.config.udp_enabled:
+                udp = UDPTransport(self.config)
+                transports_to_init.append((TransportType.UDP, udp))
 
             # WebSocket transport
-            try:
-                ws = WebSocketTransport(
-                    self.config,
-                    server_mode=True
-                )
-                transports_to_init.append((TransportType.WEBSOCKET, ws))
-            except ImportError:
-                logger.warning("WebSocket transport unavailable (install websockets)")
+            if self.config.websocket_enabled:
+                try:
+                    ws = WebSocketTransport(
+                        self.config,
+                        server_mode=True
+                    )
+                    transports_to_init.append((TransportType.WEBSOCKET, ws))
+                except ImportError:
+                    logger.warning("WebSocket transport unavailable (install websockets)")
+
+            # Set local_id and local_info on all transports BEFORE connecting (needed for mDNS and peer announce)
+            if self._local_id:
+                for _, transport in transports_to_init:
+                    if hasattr(transport, "set_local_id"):
+                        transport.set_local_id(self._local_id)
+                    if hasattr(transport, "set_local_info") and self._local_info:
+                        transport.set_local_info(self._local_info)
 
             # Connect transports in parallel
             connect_tasks = []
@@ -249,6 +261,34 @@ class AutoTransport(Transport):
         for transport in self._transports.values():
             if hasattr(transport, "set_local_id"):
                 transport.set_local_id(entity_id)
+
+    def set_local_info(self, info: dict) -> None:
+        """
+        Set local node info for peer announcements.
+
+        Args:
+            info: Dict with entity_type, capabilities, etc.
+        """
+        self._local_info = info
+        # Propagate to transports that support it
+        for transport in self._transports.values():
+            if hasattr(transport, "set_local_info"):
+                transport.set_local_info(info)
+
+    async def connect_to_peer(self, url: str) -> bool:
+        """
+        Connect to a remote peer via WebSocket.
+
+        Args:
+            url: WebSocket URL (ws://host:port)
+
+        Returns:
+            True if connection successful
+        """
+        ws_transport = self._transports.get(TransportType.WEBSOCKET)
+        if ws_transport and hasattr(ws_transport, "connect_to_peer"):
+            return await ws_transport.connect_to_peer(url)
+        return False
 
     def _select_transport(
         self,

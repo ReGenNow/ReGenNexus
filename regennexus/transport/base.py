@@ -7,16 +7,67 @@ Copyright (c) 2024-2025 ReGen Designs LLC
 """
 
 import asyncio
+import socket
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, field
 from enum import Enum, auto
-from typing import Any, Callable, Dict, List, Optional, Set
+from typing import Any, Callable, Dict, List, Optional, Set, Tuple
 import time
 import logging
 
 from regennexus.core.message import Message
 
 logger = logging.getLogger(__name__)
+
+
+def find_available_port(start: int, end: int, protocol: str = "udp") -> Optional[int]:
+    """
+    Find an available port in the given range.
+
+    Args:
+        start: Start of port range
+        end: End of port range
+        protocol: 'udp' or 'tcp'
+
+    Returns:
+        Available port number, or None if no port available
+    """
+    sock_type = socket.SOCK_DGRAM if protocol == "udp" else socket.SOCK_STREAM
+
+    for port in range(start, end + 1):
+        try:
+            sock = socket.socket(socket.AF_INET, sock_type)
+            sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+            sock.bind(("", port))
+            sock.close()
+            return port
+        except OSError:
+            continue
+
+    return None
+
+
+def is_port_available(port: int, protocol: str = "udp") -> bool:
+    """
+    Check if a specific port is available.
+
+    Args:
+        port: Port number to check
+        protocol: 'udp' or 'tcp'
+
+    Returns:
+        True if port is available
+    """
+    sock_type = socket.SOCK_DGRAM if protocol == "udp" else socket.SOCK_STREAM
+
+    try:
+        sock = socket.socket(socket.AF_INET, sock_type)
+        sock.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        sock.bind(("", port))
+        sock.close()
+        return True
+    except OSError:
+        return False
 
 
 class TransportState(Enum):
@@ -56,12 +107,14 @@ class TransportConfig:
 
     # UDP settings
     udp_multicast_group: str = "224.0.0.251"
-    udp_port: int = 5353
+    udp_port: int = 5454  # Changed from 5353 to avoid mDNS conflicts
+    udp_port_range: tuple = (5454, 5500)  # Range for auto-detection
     udp_broadcast_interval: float = 5.0
 
     # WebSocket settings
     ws_host: str = "0.0.0.0"
     ws_port: int = 8765
+    ws_port_range: tuple = (8765, 8800)  # Range for auto-detection
     ws_ssl: bool = False
     ws_ssl_cert: str = ""
     ws_ssl_key: str = ""

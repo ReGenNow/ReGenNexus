@@ -6,7 +6,7 @@ Universal Adapter Protocol by ReGen Designs LLC
 
 __title__ = "regennexus"
 __description__ = "Universal Adapter Protocol for fast device communication"
-__version__ = "0.2.7"
+__version__ = "0.2.8"
 __author__ = "ReGen Designs LLC"
 __author_email__ = "contact@regendesigns.com"
 __license__ = "MIT"

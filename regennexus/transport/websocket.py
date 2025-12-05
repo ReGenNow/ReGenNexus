@@ -45,6 +45,7 @@ class WebSocketTransport(Transport):
     - SSL/TLS encryption
     - Automatic reconnection
     - Ping/pong heartbeat
+    - Bidirectional peer discovery
     """
 
     def __init__(
@@ -72,8 +73,12 @@ class WebSocketTransport(Transport):
         self._server = None
         self._client_ws = None
         self._clients: Dict[str, "websockets.WebSocketServerProtocol"] = {}
+        self._outbound_clients: Dict[str, "websockets.WebSocketClientProtocol"] = {}
         self._receive_task: Optional[asyncio.Task] = None
+        self._outbound_tasks: Dict[str, asyncio.Task] = {}
         self._local_id: Optional[str] = None
+        self._local_info: Dict = {}
+        self._known_peer_urls: Set[str] = set()
 
     def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Create SSL context if configured."""
@@ -201,7 +206,25 @@ class WebSocketTransport(Transport):
             websocket: Client WebSocket connection
         """
         peer_id = None
+        peer_ws_url = None
+        remote_addr = websocket.remote_address if hasattr(websocket, 'remote_address') else None
+
         try:
+            # Send welcome message with our info
+            welcome = Message(
+                sender_id=self._local_id or "server",
+                recipient_id="*",
+                intent="welcome",
+                content={
+                    "node_id": self._local_id,
+                    "ws_url": f"ws://{self.config.ws_host}:{self.config.ws_port}",
+                    "message": "Connected to mesh network",
+                    **self._local_info
+                }
+            )
+            await websocket.send(json.dumps(welcome.to_dict()))
+            logger.info(f"New peer connected from {remote_addr}, sent welcome")
+
             async for raw_message in websocket:
                 try:
                     data = json.loads(raw_message)
@@ -212,10 +235,21 @@ class WebSocketTransport(Transport):
                         if msg.sender_id not in self._clients:
                             self._clients[msg.sender_id] = websocket
                             self._connected_peers.add(msg.sender_id)
-                            logger.debug(f"WebSocket client connected: {msg.sender_id}")
+                            logger.info(f"Peer registered: {msg.sender_id}")
                         peer_id = msg.sender_id
 
                     self._update_receive_stats(len(raw_message))
+
+                    # Handle peer announcement - connect back to them
+                    if msg.intent == "peer_announce" and msg.content:
+                        peer_ws_url = msg.content.get("ws_url")
+                        if peer_ws_url and peer_ws_url not in self._outbound_clients:
+                            # Connect back to the peer for bidirectional communication
+                            logger.info(f"Peer announced at {peer_ws_url}, connecting back...")
+                            asyncio.create_task(self.connect_to_peer(peer_ws_url))
+                        # Dispatch the announce so mesh can register the peer
+                        await self._dispatch_message(msg)
+                        continue
 
                     # Handle registration
                     if msg.intent == "register":
@@ -230,7 +264,7 @@ class WebSocketTransport(Transport):
                     self._stats.errors += 1
 
         except ConnectionClosed:
-            logger.debug(f"WebSocket client disconnected: {peer_id}")
+            logger.info(f"Peer disconnected: {peer_id or remote_addr}")
         except Exception as e:
             logger.error(f"Client handler error: {e}")
         finally:
@@ -276,7 +310,24 @@ class WebSocketTransport(Transport):
                 except asyncio.CancelledError:
                     pass
 
-            # Close client connections (server mode)
+            # Cancel outbound receive tasks
+            for url, task in list(self._outbound_tasks.items()):
+                task.cancel()
+                try:
+                    await task
+                except asyncio.CancelledError:
+                    pass
+            self._outbound_tasks.clear()
+
+            # Close outbound peer connections
+            for url, ws in list(self._outbound_clients.items()):
+                try:
+                    await ws.close()
+                except Exception:
+                    pass
+            self._outbound_clients.clear()
+
+            # Close inbound client connections (server mode)
             for peer_id, ws in list(self._clients.items()):
                 try:
                     await ws.close()
@@ -309,6 +360,105 @@ class WebSocketTransport(Transport):
             entity_id: Local entity's ID
         """
         self._local_id = entity_id
+
+    def set_local_info(self, info: Dict) -> None:
+        """
+        Set local node info for peer announcements.
+
+        Args:
+            info: Dict with node_id, entity_type, capabilities, etc.
+        """
+        self._local_info = info
+
+    def add_known_peer(self, url: str) -> None:
+        """
+        Add a known peer URL to connect to.
+
+        Args:
+            url: WebSocket URL (ws://host:port)
+        """
+        self._known_peer_urls.add(url)
+
+    async def connect_to_peer(self, url: str) -> bool:
+        """
+        Connect to a remote peer's WebSocket server.
+
+        Args:
+            url: WebSocket URL (ws://host:port)
+
+        Returns:
+            True if connection successful
+        """
+        if url in self._outbound_clients:
+            return True
+
+        try:
+            logger.info(f"Connecting to peer at {url}...")
+            ws = await asyncio.wait_for(
+                ws_connect(url, ping_interval=20, ping_timeout=10),
+                timeout=self.config.connect_timeout
+            )
+
+            # Send our announcement
+            announce = Message(
+                sender_id=self._local_id or "unknown",
+                recipient_id="*",
+                intent="peer_announce",
+                content={
+                    "node_id": self._local_id,
+                    "ws_url": f"ws://{self.config.ws_host}:{self.config.ws_port}",
+                    **self._local_info
+                }
+            )
+            await ws.send(json.dumps(announce.to_dict()))
+
+            self._outbound_clients[url] = ws
+            self._known_peer_urls.add(url)
+
+            # Start receive loop for this connection
+            task = asyncio.create_task(self._outbound_receive_loop(url, ws))
+            self._outbound_tasks[url] = task
+
+            logger.info(f"Connected to peer: {url}")
+            return True
+
+        except asyncio.TimeoutError:
+            logger.warning(f"Timeout connecting to peer: {url}")
+            return False
+        except Exception as e:
+            logger.warning(f"Failed to connect to peer {url}: {e}")
+            return False
+
+    async def _outbound_receive_loop(self, url: str, ws) -> None:
+        """Receive loop for outbound peer connections."""
+        try:
+            async for raw_message in ws:
+                try:
+                    data = json.loads(raw_message)
+                    msg = Message.from_dict(data)
+                    self._update_receive_stats(len(raw_message))
+
+                    # Track peer
+                    if msg.sender_id and msg.sender_id not in self._connected_peers:
+                        self._connected_peers.add(msg.sender_id)
+                        logger.info(f"Peer identified: {msg.sender_id}")
+
+                    await self._dispatch_message(msg)
+
+                except json.JSONDecodeError:
+                    logger.warning("Invalid JSON from peer")
+                except Exception as e:
+                    logger.error(f"Peer message handling error: {e}")
+
+        except ConnectionClosed:
+            logger.info(f"Peer connection closed: {url}")
+        except asyncio.CancelledError:
+            pass
+        except Exception as e:
+            logger.error(f"Peer receive loop error: {e}")
+        finally:
+            self._outbound_clients.pop(url, None)
+            self._outbound_tasks.pop(url, None)
 
     async def send(self, message: Message, target: Optional[str] = None) -> bool:
         """
@@ -360,24 +510,21 @@ class WebSocketTransport(Transport):
 
     async def broadcast(self, message: Message) -> int:
         """
-        Broadcast message to all connected clients.
+        Broadcast message to all connected peers (inbound and outbound).
 
         Args:
             message: Message to broadcast
 
         Returns:
-            Number of clients message was sent to
+            Number of peers message was sent to
         """
         if self._state != TransportState.CONNECTED:
-            return 0
-
-        if not self._server_mode:
-            # Client can't broadcast
             return 0
 
         data = json.dumps(message.to_dict())
         count = 0
 
+        # Send to inbound clients (peers that connected to us)
         for peer_id, ws in list(self._clients.items()):
             try:
                 await ws.send(data)
@@ -385,6 +532,16 @@ class WebSocketTransport(Transport):
                 self._update_send_stats(len(data))
             except Exception as e:
                 logger.error(f"Broadcast to {peer_id} failed: {e}")
+                self._stats.errors += 1
+
+        # Send to outbound connections (peers we connected to)
+        for url, ws in list(self._outbound_clients.items()):
+            try:
+                await ws.send(data)
+                count += 1
+                self._update_send_stats(len(data))
+            except Exception as e:
+                logger.error(f"Broadcast to {url} failed: {e}")
                 self._stats.errors += 1
 
         return count
