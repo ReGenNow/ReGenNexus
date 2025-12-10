@@ -74,11 +74,15 @@ class WebSocketTransport(Transport):
         self._client_ws = None
         self._clients: Dict[str, "websockets.WebSocketServerProtocol"] = {}
         self._outbound_clients: Dict[str, "websockets.WebSocketClientProtocol"] = {}
+        self._peer_id_to_url: Dict[str, str] = {}  # Map peer node_id to outbound URL
         self._receive_task: Optional[asyncio.Task] = None
         self._outbound_tasks: Dict[str, asyncio.Task] = {}
         self._local_id: Optional[str] = None
         self._local_info: Dict = {}
         self._known_peer_urls: Set[str] = set()
+        self._heartbeat_task: Optional[asyncio.Task] = None
+        self._heartbeat_interval: int = 30  # seconds
+        self._peer_lookup_callback = None  # Callback to get real peer list from mesh
 
     def _create_ssl_context(self) -> Optional[ssl.SSLContext]:
         """Create SSL context if configured."""
@@ -178,8 +182,8 @@ class WebSocketTransport(Transport):
             # Send registration message
             if self._local_id:
                 reg_msg = Message(
-                    source=self._local_id,
-                    target="server",
+                    sender_id=self._local_id,
+                    recipient_id="server",
                     intent="register",
                     content={"id": self._local_id}
                 )
@@ -210,7 +214,7 @@ class WebSocketTransport(Transport):
         remote_addr = websocket.remote_address if hasattr(websocket, 'remote_address') else None
 
         try:
-            # Send welcome message with our info
+            # Send welcome message with our info (this is our "hello")
             welcome = Message(
                 sender_id=self._local_id or "server",
                 recipient_id="*",
@@ -228,10 +232,32 @@ class WebSocketTransport(Transport):
             async for raw_message in websocket:
                 try:
                     data = json.loads(raw_message)
+
+                    # Handle mesh.peers request early (before Message parsing)
+                    if data.get("intent") == "mesh.peers":
+                        logger.info(f"Received mesh.peers request from {data.get('sender_id', 'unknown')}")
+
+                        # Use peer lookup callback if available (gets real mesh peers)
+                        if self._peer_lookup_callback:
+                            peers_data = self._peer_lookup_callback()
+                        else:
+                            # Fallback to WebSocket-only connected peers
+                            peers_data = [{"node_id": pid} for pid in self._connected_peers]
+
+                        response = Message(
+                            sender_id=self._local_id or "mesh",
+                            recipient_id=data.get("sender_id", "*"),
+                            intent="mesh.peers.response",
+                            content={"peers": peers_data, "count": len(peers_data)},
+                        )
+                        await websocket.send(response.to_json())
+                        logger.info(f"Sent mesh.peers.response with {len(peers_data)} peers")
+                        continue
+
                     msg = Message.from_dict(data)
 
-                    # Track peer
-                    if msg.sender_id:
+                    # Track peer from any message with sender_id
+                    if msg.sender_id and msg.sender_id != "cli":
                         if msg.sender_id not in self._clients:
                             self._clients[msg.sender_id] = websocket
                             self._connected_peers.add(msg.sender_id)
@@ -240,19 +266,68 @@ class WebSocketTransport(Transport):
 
                     self._update_receive_stats(len(raw_message))
 
-                    # Handle peer announcement - connect back to them
+                    # Handle peer announcement - this is the "hello" from connecting peer
+                    # We respond with "peer_announce_ack" (our "hi" back)
                     if msg.intent == "peer_announce" and msg.content:
+                        peer_node_id = msg.content.get("node_id")
                         peer_ws_url = msg.content.get("ws_url")
-                        if peer_ws_url and peer_ws_url not in self._outbound_clients:
-                            # Connect back to the peer for bidirectional communication
-                            logger.info(f"Peer announced at {peer_ws_url}, connecting back...")
-                            asyncio.create_task(self.connect_to_peer(peer_ws_url))
+
+                        # Register this peer
+                        if peer_node_id:
+                            self._clients[peer_node_id] = websocket
+                            self._connected_peers.add(peer_node_id)
+                            peer_id = peer_node_id
+                            logger.info(f"Peer announced: {peer_node_id} at {peer_ws_url}")
+
+                        # Send acknowledgment back with our info (the "hi")
+                        ack = Message(
+                            sender_id=self._local_id or "server",
+                            recipient_id=peer_node_id or "*",
+                            intent="peer_announce_ack",
+                            content={
+                                "node_id": self._local_id,
+                                "ws_url": f"ws://{self.config.ws_host}:{self.config.ws_port}",
+                                "message": "Peer acknowledged",
+                                **self._local_info
+                            }
+                        )
+                        await websocket.send(json.dumps(ack.to_dict()))
+                        logger.info(f"Sent peer_announce_ack to {peer_node_id}")
+
                         # Dispatch the announce so mesh can register the peer
                         await self._dispatch_message(msg)
                         continue
 
+                    # Handle heartbeat - peer is still alive, update tracking
+                    if msg.intent == "heartbeat" and msg.content:
+                        heartbeat_node_id = msg.content.get("node_id")
+                        if heartbeat_node_id and heartbeat_node_id not in self._connected_peers:
+                            self._connected_peers.add(heartbeat_node_id)
+                            logger.info(f"Peer re-discovered via heartbeat: {heartbeat_node_id}")
+                        continue
+
                     # Handle registration
                     if msg.intent == "register":
+                        continue
+
+                    # Handle mesh.ping directly - respond on same socket connection
+                    # Respond immediately, do NOT dispatch to mesh (prevents echo loop)
+                    if msg.intent == "mesh.ping":
+                        ping_id = msg.content.get("ping_id") if msg.content else None
+                        pong = Message(
+                            sender_id=self._local_id or "server",
+                            recipient_id=msg.sender_id,
+                            intent="mesh.pong",
+                            content={
+                                "pong": True,
+                                "from": self._local_id,
+                                "time": __import__("time").time(),
+                                "ping_id": ping_id
+                            }
+                        )
+                        await websocket.send(json.dumps(pong.to_dict()))
+                        logger.debug(f"Sent mesh.pong to {msg.sender_id} (ping_id={ping_id})")
+                        # Do NOT dispatch - this prevents echo loops
                         continue
 
                     await self._dispatch_message(msg)
@@ -271,6 +346,7 @@ class WebSocketTransport(Transport):
             if peer_id:
                 self._clients.pop(peer_id, None)
                 self._connected_peers.discard(peer_id)
+                logger.info(f"Peer removed from cache: {peer_id}")
 
     async def _client_receive_loop(self) -> None:
         """Receive loop for client mode."""
@@ -301,6 +377,15 @@ class WebSocketTransport(Transport):
         """Disconnect WebSocket transport."""
         async with self._lock:
             self._state = TransportState.DISCONNECTED
+
+            # Cancel heartbeat task
+            if self._heartbeat_task:
+                self._heartbeat_task.cancel()
+                try:
+                    await self._heartbeat_task
+                except asyncio.CancelledError:
+                    pass
+                self._heartbeat_task = None
 
             # Cancel receive task
             if self._receive_task:
@@ -370,6 +455,15 @@ class WebSocketTransport(Transport):
         """
         self._local_info = info
 
+    def set_peer_lookup(self, callback) -> None:
+        """
+        Set callback to lookup peers from mesh.
+
+        Args:
+            callback: Function that returns list of peer dicts with node_id, etc.
+        """
+        self._peer_lookup_callback = callback
+
     def add_known_peer(self, url: str) -> None:
         """
         Add a known peer URL to connect to.
@@ -398,6 +492,19 @@ class WebSocketTransport(Transport):
                 ws_connect(url, ping_interval=20, ping_timeout=10),
                 timeout=self.config.connect_timeout
             )
+
+            # Wait for welcome message from peer
+            peer_node_id = None
+            try:
+                welcome_raw = await asyncio.wait_for(ws.recv(), timeout=5.0)
+                welcome_data = json.loads(welcome_raw)
+                peer_node_id = welcome_data.get("content", {}).get("node_id")
+                if peer_node_id:
+                    self._connected_peers.add(peer_node_id)
+                    self._peer_id_to_url[peer_node_id] = url  # Map node_id to URL
+                    logger.info(f"Peer identified from welcome: {peer_node_id}")
+            except Exception as e:
+                logger.warning(f"Failed to get welcome from {url}: {e}")
 
             # Send our announcement
             announce = Message(
@@ -431,6 +538,7 @@ class WebSocketTransport(Transport):
 
     async def _outbound_receive_loop(self, url: str, ws) -> None:
         """Receive loop for outbound peer connections."""
+        peer_node_id = None
         try:
             async for raw_message in ws:
                 try:
@@ -438,10 +546,36 @@ class WebSocketTransport(Transport):
                     msg = Message.from_dict(data)
                     self._update_receive_stats(len(raw_message))
 
-                    # Track peer
-                    if msg.sender_id and msg.sender_id not in self._connected_peers:
-                        self._connected_peers.add(msg.sender_id)
-                        logger.info(f"Peer identified: {msg.sender_id}")
+                    # Track peer from sender_id (but not "cli" or "server")
+                    if msg.sender_id and msg.sender_id not in ("cli", "server"):
+                        if msg.sender_id not in self._connected_peers:
+                            self._connected_peers.add(msg.sender_id)
+                            peer_node_id = msg.sender_id
+                            logger.info(f"Peer identified: {msg.sender_id}")
+
+                    # Handle welcome message - server's initial "hello"
+                    if msg.intent == "welcome" and msg.content:
+                        node_id = msg.content.get("node_id")
+                        if node_id and node_id not in self._connected_peers:
+                            self._connected_peers.add(node_id)
+                            peer_node_id = node_id
+                            logger.info(f"Peer identified from welcome: {node_id}")
+
+                    # Handle peer_announce_ack - server's "hi" response to our "hello"
+                    if msg.intent == "peer_announce_ack" and msg.content:
+                        node_id = msg.content.get("node_id")
+                        if node_id and node_id not in self._connected_peers:
+                            self._connected_peers.add(node_id)
+                            peer_node_id = node_id
+                            logger.info(f"Peer acknowledged us: {node_id}")
+
+                    # Handle heartbeat - peer is still alive
+                    if msg.intent == "heartbeat" and msg.content:
+                        node_id = msg.content.get("node_id")
+                        if node_id and node_id not in self._connected_peers:
+                            self._connected_peers.add(node_id)
+                            peer_node_id = node_id
+                            logger.info(f"Peer re-discovered via heartbeat: {node_id}")
 
                     await self._dispatch_message(msg)
 
@@ -452,6 +586,11 @@ class WebSocketTransport(Transport):
 
         except ConnectionClosed:
             logger.info(f"Peer connection closed: {url}")
+            # Remove peer from connected list on disconnect
+            if peer_node_id:
+                self._connected_peers.discard(peer_node_id)
+                self._peer_id_to_url.pop(peer_node_id, None)  # Clean up mapping
+                logger.info(f"Peer removed from cache: {peer_node_id}")
         except asyncio.CancelledError:
             pass
         except Exception as e:
@@ -481,7 +620,16 @@ class WebSocketTransport(Transport):
             if self._server_mode:
                 # Server mode - send to specific client
                 if target and target in self._clients:
+                    # Inbound client (they connected to us)
                     await self._clients[target].send(data)
+                elif target and target in self._peer_id_to_url:
+                    # Outbound client (we connected to them)
+                    url = self._peer_id_to_url[target]
+                    if url in self._outbound_clients:
+                        await self._outbound_clients[url].send(data)
+                    else:
+                        logger.warning(f"Outbound connection lost for: {target}")
+                        return False
                 elif target:
                     logger.warning(f"Unknown client: {target}")
                     return False
@@ -545,3 +693,90 @@ class WebSocketTransport(Transport):
                 self._stats.errors += 1
 
         return count
+
+    async def broadcast_to_local_clients(self, message: Message) -> int:
+        """
+        Broadcast message only to local inbound clients (like CLI).
+
+        This is used to forward pong responses to CLI clients
+        that are waiting for ping results.
+
+        IMPORTANT: Only sends to clients with 'cli-' prefix to avoid
+        sending to remote peer connections which would create echo loops.
+
+        Args:
+            message: Message to broadcast
+
+        Returns:
+            Number of local clients message was sent to
+        """
+        if self._state != TransportState.CONNECTED:
+            return 0
+
+        data = json.dumps(message.to_dict())
+        count = 0
+
+        # Send ONLY to local CLI clients (peer_id starts with "cli-")
+        # Do NOT send to remote peer connections (would create echo loops)
+        for peer_id, ws in list(self._clients.items()):
+            # Only send to CLI clients, not to remote peers
+            if not peer_id.startswith("cli-"):
+                continue
+            try:
+                await ws.send(data)
+                count += 1
+            except Exception as e:
+                logger.debug(f"Broadcast to local client {peer_id} failed: {e}")
+
+        return count
+
+    def start_heartbeat(self, interval: int = 30) -> None:
+        """
+        Start periodic heartbeat to maintain peer awareness.
+
+        This sends periodic announcements to all peers and attempts
+        to reconnect to known peers that may have disconnected.
+
+        Args:
+            interval: Seconds between heartbeats (default 30)
+        """
+        self._heartbeat_interval = interval
+        if self._heartbeat_task is None or self._heartbeat_task.done():
+            self._heartbeat_task = asyncio.create_task(self._heartbeat_loop())
+            logger.info(f"Heartbeat started (every {interval}s)")
+
+    async def _heartbeat_loop(self) -> None:
+        """Periodic heartbeat loop."""
+        while self._state == TransportState.CONNECTED:
+            try:
+                await asyncio.sleep(self._heartbeat_interval)
+
+                # Send heartbeat to all connected peers
+                heartbeat = Message(
+                    sender_id=self._local_id or "unknown",
+                    recipient_id="*",
+                    intent="heartbeat",
+                    content={
+                        "node_id": self._local_id,
+                        "ws_url": f"ws://{self.config.ws_host}:{self.config.ws_port}",
+                        "timestamp": time.time(),
+                        **self._local_info
+                    }
+                )
+
+                sent_count = await self.broadcast(heartbeat)
+                if sent_count > 0:
+                    logger.debug(f"Heartbeat sent to {sent_count} peers")
+
+                # Try to reconnect to known peers that we've lost connection to
+                for url in list(self._known_peer_urls):
+                    if url not in self._outbound_clients:
+                        logger.info(f"Attempting to reconnect to {url}")
+                        asyncio.create_task(self.connect_to_peer(url))
+
+            except asyncio.CancelledError:
+                break
+            except Exception as e:
+                logger.error(f"Heartbeat error: {e}")
+
+        logger.info("Heartbeat stopped")

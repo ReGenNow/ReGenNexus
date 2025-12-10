@@ -5,6 +5,8 @@ Automatic plug-and-play mesh networking. Devices find each other
 on LAN via UDP multicast, across networks via WebSocket, and
 communicate using the best available transport.
 
+Now with PeerManager for persistent connections and auto-reconnect.
+
 Copyright (c) 2024-2025 ReGen Designs LLC
 """
 
@@ -19,6 +21,7 @@ from enum import Enum
 from typing import Any, Callable, Dict, List, Optional, Set
 
 from regennexus.core.message import Message
+from regennexus.core.peer_manager import PeerManager, ConnectionState
 from regennexus.transport.base import TransportConfig, TransportType
 from regennexus.transport.auto import AutoTransport
 
@@ -41,14 +44,23 @@ class MeshNode:
     capabilities: List[str] = field(default_factory=list)
     address: Optional[str] = None
     port: int = 0
+    ws_url: Optional[str] = None  # WebSocket URL for persistent connection
     transport: TransportType = TransportType.UDP
     last_seen: float = 0.0
     metadata: Dict[str, Any] = field(default_factory=dict)
+    # Connection health (managed by PeerManager)
+    connection_state: str = "unknown"  # connected, reconnecting, disconnected
+    last_rtt: float = 0.0  # Last ping round-trip time in ms
 
     @property
     def is_stale(self) -> bool:
         """Check if node hasn't been seen recently."""
         return time.time() - self.last_seen > 60.0  # 60 second timeout
+
+    @property
+    def is_connected(self) -> bool:
+        """Check if peer has active connection."""
+        return self.connection_state == "connected"
 
 
 @dataclass
@@ -66,13 +78,17 @@ class MeshConfig:
     # Transport settings
     auto_select_transport: bool = True
     udp_enabled: bool = True
-    udp_port: int = 5353
+    udp_port: int = 5454  # Changed from 5353 to avoid mDNS conflicts
     udp_multicast_group: str = "239.255.255.250"
 
     websocket_enabled: bool = True
     websocket_port: int = 8765
 
     ipc_enabled: bool = True
+
+    # PeerManager settings (persistent connections)
+    # No keepalive pings - WebSocket protocol handles that automatically
+    reconnect_delays: List[float] = field(default_factory=lambda: [1, 2, 5, 10, 30])
 
     # Hub settings (for internet connectivity)
     hub_url: Optional[str] = None  # Central hub for cross-network discovery
@@ -127,8 +143,14 @@ class MeshNetwork:
         self._peers: Dict[str, MeshNode] = {}
         self._peer_lock = asyncio.Lock()
 
-        # Transport
+        # Transport (for discovery and local WebSocket server)
         self._transport: Optional[AutoTransport] = None
+
+        # PeerManager for persistent connections to peers
+        self._peer_manager: Optional[PeerManager] = None
+
+        # Pending ping futures (for CLI ping commands)
+        self._pending_pings: Dict[str, asyncio.Future] = {}
 
         # Tasks
         self._discovery_task: Optional[asyncio.Task] = None
@@ -142,8 +164,8 @@ class MeshNetwork:
         """
         Start mesh network.
 
-        Initializes transport, starts discovery, and begins
-        listening for peer announcements.
+        Initializes transport, starts discovery, starts PeerManager
+        for persistent connections, and begins listening for peer announcements.
 
         Returns:
             True if started successfully
@@ -175,10 +197,30 @@ class MeshNetwork:
             })
             self._transport.add_handler(self._handle_message)
 
+            # Set up peer lookup callback for mesh.peers requests
+            self._transport.set_peer_lookup(self._get_peer_list_for_lookup)
+
             if not await self._transport.connect():
                 logger.error("Failed to connect transport")
                 self.state = NodeState.ERROR
                 return False
+
+            # Initialize PeerManager for persistent connections
+            # No continuous keepalive pings - WebSocket protocol handles connection health
+            self._peer_manager = PeerManager(
+                local_id=self.node_id,
+                local_info={
+                    "entity_type": self.config.entity_type,
+                    "capabilities": self.config.capabilities,
+                    "ws_url": f"ws://0.0.0.0:{self.config.websocket_port}",
+                },
+                reconnect_delays=self.config.reconnect_delays,
+                on_peer_connected=self._on_peer_manager_connected,
+                on_peer_disconnected=self._on_peer_manager_disconnected,
+                on_message=self._on_peer_manager_message,
+            )
+            await self._peer_manager.start()
+            logger.info("PeerManager started (presence-based, no ping flooding)")
 
             # Start discovery loop
             if self.config.discovery_enabled:
@@ -199,6 +241,50 @@ class MeshNetwork:
             logger.error(f"Mesh start error: {e}")
             self.state = NodeState.ERROR
             return False
+
+    async def _on_peer_manager_connected(self, peer_id: str) -> None:
+        """Called when PeerManager establishes connection to a peer."""
+        async with self._peer_lock:
+            if peer_id in self._peers:
+                self._peers[peer_id].connection_state = "connected"
+                logger.info(f"Peer connection established: {peer_id}")
+
+    async def _on_peer_manager_disconnected(self, peer_id: str) -> None:
+        """Called when PeerManager loses connection to a peer."""
+        async with self._peer_lock:
+            if peer_id in self._peers:
+                self._peers[peer_id].connection_state = "reconnecting"
+                logger.info(f"Peer connection lost, reconnecting: {peer_id}")
+
+    async def _on_peer_manager_message(self, message: Message, peer_id: str) -> None:
+        """Called when PeerManager receives a message from a peer."""
+        # Update last_seen
+        async with self._peer_lock:
+            if peer_id in self._peers:
+                self._peers[peer_id].last_seen = time.time()
+
+        # Handle pong for pending pings
+        if message.intent == "mesh.pong":
+            content = message.content or {}
+            ping_id = content.get("ping_id")
+            if ping_id and ping_id in self._pending_pings:
+                try:
+                    self._pending_pings[ping_id].set_result(message)
+                except asyncio.InvalidStateError:
+                    pass  # Future already done
+
+        # Forward to transport for local clients (CLI)
+        if self._transport:
+            await self._transport.broadcast_to_local_clients(message)
+
+        # Call registered message handlers
+        for handler in self._message_handlers:
+            try:
+                result = handler(message)
+                if asyncio.iscoroutine(result):
+                    await result
+            except Exception as e:
+                logger.error(f"Message handler error: {e}")
 
     async def stop(self) -> None:
         """Stop mesh network."""
@@ -221,6 +307,12 @@ class MeshNetwork:
                 await self._cleanup_task
             except asyncio.CancelledError:
                 pass
+
+        # Stop PeerManager (closes all persistent connections)
+        if self._peer_manager:
+            await self._peer_manager.stop()
+            self._peer_manager = None
+            logger.info("PeerManager stopped")
 
         # Send goodbye
         await self._announce(leaving=True)
@@ -255,6 +347,21 @@ class MeshNetwork:
         except asyncio.CancelledError:
             pass
 
+    def _get_local_ip(self) -> Optional[str]:
+        """Get local LAN IP address for announcements."""
+        try:
+            # Connect to external address to find default route IP
+            s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+            s.settimeout(0.1)
+            try:
+                s.connect(("8.8.8.8", 80))
+                local_ip = s.getsockname()[0]
+            finally:
+                s.close()
+            return local_ip
+        except Exception:
+            return None
+
     async def _announce(self, leaving: bool = False) -> None:
         """
         Announce presence to the network.
@@ -265,16 +372,24 @@ class MeshNetwork:
         if not self._transport:
             return
 
+        # Build announcement content with ws_url for peer connections
+        content = {
+            "node_id": self.node_id,
+            "entity_type": self.config.entity_type,
+            "capabilities": self.config.capabilities,
+            "timestamp": time.time(),
+        }
+
+        # Include ws_url so peers can connect back to us
+        local_ip = self._get_local_ip()
+        if local_ip:
+            content["ws_url"] = f"ws://{local_ip}:{self.config.websocket_port}"
+
         announcement = Message(
             sender_id=self.node_id,
             recipient_id="*",
             intent="mesh.announce" if not leaving else "mesh.goodbye",
-            content={
-                "node_id": self.node_id,
-                "entity_type": self.config.entity_type,
-                "capabilities": self.config.capabilities,
-                "timestamp": time.time(),
-            },
+            content=content,
         )
 
         await self._transport.broadcast(announcement)
@@ -287,7 +402,38 @@ class MeshNetwork:
             message: Received message
         """
         try:
-            # Handle mesh protocol messages
+            # NEVER forward mesh protocol messages - they should be handled
+            # directly by the recipient, not routed through intermediate nodes
+            # This prevents echo/amplification loops in the mesh network
+            mesh_protocol_intents = (
+                "mesh.ping", "mesh.pong", "mesh.announce", "mesh.goodbye",
+                "peer_announce", "peer_announce_ack"
+            )
+            if message.intent in mesh_protocol_intents:
+                # Only process if addressed to us or broadcast
+                recipient = message.recipient_id
+                if recipient and recipient != "*" and recipient != self.node_id:
+                    # Mesh protocol message for another peer - drop it, don't forward
+                    logger.debug(f"Dropping {message.intent} not addressed to us (for {recipient})")
+                    return
+                # Fall through to handle locally
+            else:
+                # Check if message should be routed to another peer
+                recipient = message.recipient_id
+                if recipient and recipient != "*" and recipient != self.node_id:
+                    # Message is for another peer - forward it via PeerManager
+                    logger.debug(f"Routing message to {recipient}: intent={message.intent}")
+
+                    sent = False
+                    if self._peer_manager:
+                        sent = await self._peer_manager.send_to_peer(recipient, message)
+
+                    if not sent and self._transport:
+                        # Fallback to transport if PeerManager doesn't have connection
+                        await self._transport.send(message, recipient)
+                    return
+
+            # Handle mesh protocol messages (for us or broadcast)
             if message.intent == "mesh.announce":
                 await self._handle_announcement(message)
             elif message.intent == "mesh.goodbye":
@@ -319,6 +465,8 @@ class MeshNetwork:
         if not node_id or node_id == self.node_id:
             return
 
+        ws_url = content.get("ws_url")
+
         async with self._peer_lock:
             is_new = node_id not in self._peers
 
@@ -327,6 +475,7 @@ class MeshNetwork:
                 node_id=node_id,
                 entity_type=content.get("entity_type", "unknown"),
                 capabilities=content.get("capabilities", []),
+                ws_url=ws_url,
                 last_seen=time.time(),
                 metadata=content.get("metadata", {}),
             )
@@ -345,14 +494,15 @@ class MeshNetwork:
             if is_new:
                 logger.info(f"Discovered peer: {node_id} ({peer.entity_type})")
 
-                # Auto-connect via WebSocket if ws_url is provided (plug-and-play)
-                ws_url = content.get("ws_url")
-                if ws_url and self._transport:
-                    # Check if we're not already connected via WebSocket
-                    ws_transport = self._transport._transports.get(TransportType.WEBSOCKET)
-                    if ws_transport and node_id not in ws_transport.peers:
-                        logger.info(f"Auto-connecting to peer WebSocket: {ws_url}")
-                        asyncio.create_task(self._auto_connect_websocket(ws_url, node_id))
+                # Register with PeerManager for persistent connection
+                if ws_url and self._peer_manager:
+                    await self._peer_manager.add_peer(
+                        peer_id=node_id,
+                        ws_url=ws_url,
+                        entity_type=peer.entity_type,
+                        capabilities=peer.capabilities,
+                    )
+                    logger.info(f"Registered {node_id} with PeerManager: {ws_url}")
 
                 # Notify handlers
                 for handler in self._peer_handlers:
@@ -363,23 +513,6 @@ class MeshNetwork:
                     except Exception as e:
                         logger.error(f"Peer handler error: {e}")
 
-    async def _auto_connect_websocket(self, ws_url: str, peer_id: str) -> None:
-        """
-        Auto-connect to a peer's WebSocket for plug-and-play connectivity.
-
-        Args:
-            ws_url: WebSocket URL (ws://host:port)
-            peer_id: Peer's node ID
-        """
-        try:
-            if self._transport:
-                success = await self._transport.connect_to_peer(ws_url)
-                if success:
-                    logger.info(f"Auto-connected to {peer_id} via WebSocket: {ws_url}")
-                else:
-                    logger.debug(f"Could not auto-connect to {peer_id} via WebSocket")
-        except Exception as e:
-            logger.debug(f"Auto-connect to {peer_id} failed: {e}")
 
     async def _handle_goodbye(self, message: Message) -> None:
         """Handle peer leaving."""
@@ -390,6 +523,10 @@ class MeshNetwork:
         node_id = content.get("node_id")
         if not node_id:
             return
+
+        # Remove from PeerManager
+        if self._peer_manager:
+            await self._peer_manager.remove_peer(node_id)
 
         async with self._peer_lock:
             if node_id in self._peers:
@@ -405,17 +542,24 @@ class MeshNetwork:
                         logger.error(f"Peer handler error: {e}")
 
     async def _handle_ping(self, message: Message) -> None:
-        """Handle ping request."""
-        if not self._transport:
-            return
+        """Handle ping request - send pong back."""
+        content = message.content or {}
+        ping_id = content.get("ping_id", str(time.time()))
 
         pong = Message(
             sender_id=self.node_id,
             recipient_id=message.sender_id,
             intent="mesh.pong",
-            content={"timestamp": time.time()},
+            content={"timestamp": time.time(), "ping_id": ping_id},
         )
-        await self._transport.send(pong, message.sender_id)
+
+        # Try PeerManager first (persistent connection), fall back to transport
+        sent = False
+        if self._peer_manager:
+            sent = await self._peer_manager.send_to_peer(message.sender_id, pong)
+
+        if not sent and self._transport:
+            await self._transport.send(pong, message.sender_id)
 
     async def _handle_pong(self, message: Message) -> None:
         """Handle pong response."""
@@ -423,6 +567,20 @@ class MeshNetwork:
         async with self._peer_lock:
             if message.sender_id in self._peers:
                 self._peers[message.sender_id].last_seen = time.time()
+
+        # Complete any pending ping futures
+        content = message.content or {}
+        ping_id = content.get("ping_id")
+        if ping_id and ping_id in self._pending_pings:
+            try:
+                self._pending_pings[ping_id].set_result(message)
+            except asyncio.InvalidStateError:
+                pass  # Future already done
+
+        # Forward pong ONLY to local WebSocket clients (so CLI can receive it)
+        # Do NOT use broadcast() - that would send to ALL peers causing echo loops
+        if self._transport:
+            await self._transport.broadcast_to_local_clients(message)
 
     async def _cleanup_stale_peers(self) -> None:
         """Remove stale peers."""
@@ -455,7 +613,7 @@ class MeshNetwork:
         intent: str = "message",
     ) -> bool:
         """
-        Send message to a peer.
+        Send message to a peer via PeerManager persistent connection.
 
         Args:
             recipient_id: Target node ID
@@ -465,7 +623,7 @@ class MeshNetwork:
         Returns:
             True if sent successfully
         """
-        if not self._transport or self.state != NodeState.ONLINE:
+        if self.state != NodeState.ONLINE:
             return False
 
         message = Message(
@@ -475,7 +633,17 @@ class MeshNetwork:
             content=content,
         )
 
-        return await self._transport.send(message, recipient_id)
+        # Try PeerManager first (persistent connection)
+        if self._peer_manager:
+            sent = await self._peer_manager.send_to_peer(recipient_id, message)
+            if sent:
+                return True
+
+        # Fallback to transport
+        if self._transport:
+            return await self._transport.send(message, recipient_id)
+
+        return False
 
     async def broadcast(
         self,
@@ -504,36 +672,89 @@ class MeshNetwork:
 
         return await self._transport.broadcast(message)
 
-    async def ping(self, node_id: str) -> Optional[float]:
+    async def ping(self, node_id: str, timeout: float = 5.0) -> Optional[float]:
         """
-        Ping a peer and measure latency.
+        Ping a peer and measure latency using PeerManager.
 
         Args:
             node_id: Target node ID
+            timeout: Timeout in seconds
 
         Returns:
             Round-trip time in ms, or None if failed
         """
-        if not self._transport or node_id not in self._peers:
+        if node_id not in self._peers:
             return None
 
+        # Use PeerManager for reliable ping (uses persistent connection)
+        if self._peer_manager:
+            rtt = await self._peer_manager.ping_peer(node_id, timeout=timeout)
+            if rtt is not None:
+                # Update peer stats
+                async with self._peer_lock:
+                    if node_id in self._peers:
+                        self._peers[node_id].last_rtt = rtt
+                        self._peers[node_id].last_seen = time.time()
+                return rtt
+
+        # Fallback to transport-based ping with future
+        if not self._transport:
+            return None
+
+        ping_id = f"{time.time()}-{node_id}"
         start = time.time()
+
         ping_msg = Message(
             sender_id=self.node_id,
             recipient_id=node_id,
             intent="mesh.ping",
-            content={"timestamp": start},
+            content={"timestamp": start, "ping_id": ping_id},
         )
 
-        if await self._transport.send(ping_msg, node_id):
-            # Wait for pong (simplified - real impl would use future)
-            await asyncio.sleep(0.1)
-            return (time.time() - start) * 1000
-        return None
+        # Create future for pong response
+        future = asyncio.get_event_loop().create_future()
+        self._pending_pings[ping_id] = future
+
+        try:
+            if not await self._transport.send(ping_msg, node_id):
+                return None
+
+            # Wait for pong with timeout
+            await asyncio.wait_for(future, timeout=timeout)
+            rtt = (time.time() - start) * 1000
+
+            # Update peer stats
+            async with self._peer_lock:
+                if node_id in self._peers:
+                    self._peers[node_id].last_rtt = rtt
+                    self._peers[node_id].last_seen = time.time()
+
+            return rtt
+
+        except asyncio.TimeoutError:
+            return None
+        finally:
+            self._pending_pings.pop(ping_id, None)
 
     def get_peers(self) -> List[MeshNode]:
         """Get list of known peers."""
         return list(self._peers.values())
+
+    def _get_peer_list_for_lookup(self) -> List[Dict]:
+        """
+        Get peer list as dicts for mesh.peers lookup.
+
+        Returns:
+            List of peer info dicts with node_id, entity_type, capabilities
+        """
+        return [
+            {
+                "node_id": peer.node_id,
+                "entity_type": peer.entity_type,
+                "capabilities": peer.capabilities,
+            }
+            for peer in self._peers.values()
+        ]
 
     def get_peer(self, node_id: str) -> Optional[MeshNode]:
         """Get a specific peer."""

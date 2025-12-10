@@ -25,6 +25,14 @@ from regennexus.transport.udp import UDPTransport
 from regennexus.transport.websocket import WebSocketTransport
 from regennexus.transport.queue import MessageQueueTransport
 
+# Optional QUIC transport
+try:
+    from regennexus.transport.quic import QUICTransport, is_quic_available
+    QUIC_AVAILABLE = is_quic_available()
+except ImportError:
+    QUIC_AVAILABLE = False
+    QUICTransport = None
+
 logger = logging.getLogger(__name__)
 
 
@@ -114,6 +122,9 @@ def select_best_transport(
         Best TransportType for the situation
     """
     if require_reliable:
+        # QUIC provides reliability with better performance than queue
+        if QUIC_AVAILABLE:
+            return TransportType.QUIC
         return TransportType.QUEUE
 
     if target is None:
@@ -125,6 +136,9 @@ def select_best_transport(
     elif is_lan_address(target):
         return TransportType.UDP
     else:
+        # For cross-network (internet, VPN), prefer QUIC for reliability
+        if QUIC_AVAILABLE:
+            return TransportType.QUIC
         return TransportType.WEBSOCKET
 
 
@@ -146,6 +160,7 @@ class AutoTransport(Transport):
         self._peer_transports: Dict[str, TransportType] = {}
         self._local_id: Optional[str] = None
         self._local_info: Dict = {}
+        self._peer_lookup_callback = None
 
     async def connect(self) -> bool:
         """
@@ -184,13 +199,22 @@ class AutoTransport(Transport):
                 except ImportError:
                     logger.warning("WebSocket transport unavailable (install websockets)")
 
-            # Set local_id and local_info on all transports BEFORE connecting (needed for mDNS and peer announce)
-            if self._local_id:
-                for _, transport in transports_to_init:
-                    if hasattr(transport, "set_local_id"):
-                        transport.set_local_id(self._local_id)
-                    if hasattr(transport, "set_local_info") and self._local_info:
-                        transport.set_local_info(self._local_info)
+            # QUIC transport (for cross-network/VPN connections)
+            if self.config.quic_enabled and QUIC_AVAILABLE:
+                try:
+                    quic = QUICTransport(self.config)
+                    transports_to_init.append((TransportType.QUIC, quic))
+                except Exception as e:
+                    logger.warning(f"QUIC transport unavailable: {e}")
+
+            # Set local_id, local_info, and peer_lookup on all transports BEFORE connecting
+            for _, transport in transports_to_init:
+                if self._local_id and hasattr(transport, "set_local_id"):
+                    transport.set_local_id(self._local_id)
+                if self._local_info and hasattr(transport, "set_local_info"):
+                    transport.set_local_info(self._local_info)
+                if self._peer_lookup_callback and hasattr(transport, "set_peer_lookup"):
+                    transport.set_peer_lookup(self._peer_lookup_callback)
 
             # Connect transports in parallel
             connect_tasks = []
@@ -275,16 +299,38 @@ class AutoTransport(Transport):
             if hasattr(transport, "set_local_info"):
                 transport.set_local_info(info)
 
-    async def connect_to_peer(self, url: str) -> bool:
+    def set_peer_lookup(self, callback) -> None:
         """
-        Connect to a remote peer via WebSocket.
+        Set callback to lookup peers from mesh.
 
         Args:
-            url: WebSocket URL (ws://host:port)
+            callback: Function that returns list of peer dicts
+        """
+        self._peer_lookup_callback = callback
+        # Propagate to transports that support it (mainly WebSocket)
+        for transport in self._transports.values():
+            if hasattr(transport, "set_peer_lookup"):
+                transport.set_peer_lookup(callback)
+
+    async def connect_to_peer(self, url: str) -> bool:
+        """
+        Connect to a remote peer via WebSocket or QUIC.
+
+        Args:
+            url: WebSocket URL (ws://host:port) or QUIC URL (quic://host:port)
 
         Returns:
             True if connection successful
         """
+        # Check URL type and route to appropriate transport
+        if url.startswith("quic://"):
+            quic_transport = self._transports.get(TransportType.QUIC)
+            if quic_transport and hasattr(quic_transport, "connect_to_peer"):
+                return await quic_transport.connect_to_peer(url)
+            logger.warning("QUIC transport not available for peer connection")
+            return False
+
+        # Default to WebSocket for ws:// or unspecified
         ws_transport = self._transports.get(TransportType.WEBSOCKET)
         if ws_transport and hasattr(ws_transport, "connect_to_peer"):
             return await ws_transport.connect_to_peer(url)
@@ -326,8 +372,10 @@ class AutoTransport(Transport):
         )
 
         # Fall back through available transports
+        # QUIC is preferred for cross-network (VPN/internet) due to reliability
         priority = [
             best_type,
+            TransportType.QUIC,
             TransportType.WEBSOCKET,
             TransportType.UDP,
             TransportType.IPC,
@@ -405,6 +453,28 @@ class AutoTransport(Transport):
 
         self._stats.messages_sent += 1
         return total
+
+    async def broadcast_to_local_clients(self, message: Message) -> int:
+        """
+        Broadcast message only to local WebSocket clients (like CLI).
+
+        Args:
+            message: Message to broadcast
+
+        Returns:
+            Number of local clients reached
+        """
+        if self._state != TransportState.CONNECTED:
+            return 0
+
+        # Only WebSocket transport has local clients
+        ws_transport = self._transports.get(TransportType.WEBSOCKET)
+        if ws_transport and hasattr(ws_transport, 'broadcast_to_local_clients'):
+            try:
+                return await ws_transport.broadcast_to_local_clients(message)
+            except Exception as e:
+                logger.error(f"Broadcast to local clients error: {e}")
+        return 0
 
     @property
     def peers(self) -> set:

@@ -45,7 +45,7 @@ class CommunicationConfig:
     ipc_socket_path: str = "/tmp/regennexus.sock"
     udp_enabled: bool = True
     udp_multicast_group: str = "224.0.0.251"
-    udp_port: int = 5353
+    udp_port: int = 5454  # Changed from 5353 to avoid mDNS conflicts
     ws_enabled: bool = True
     ws_host: str = "0.0.0.0"
     ws_port: int = 8765

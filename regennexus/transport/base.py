@@ -85,6 +85,7 @@ class TransportType(Enum):
     IPC = "ipc"              # Local inter-process (<0.1ms)
     UDP = "udp"              # UDP multicast (1-5ms)
     WEBSOCKET = "websocket"  # WebSocket (10-50ms)
+    QUIC = "quic"            # QUIC (0.05-5ms, reliable, cross-network)
     QUEUE = "queue"          # Message queue (reliable)
     AUTO = "auto"            # Auto-select best
 
@@ -95,11 +96,11 @@ class TransportConfig:
 
     type: TransportType = TransportType.AUTO
     
-    # Transport enable flags (add these)
+    # Transport enable flags
     udp_enabled: bool = True
     websocket_enabled: bool = True
     ipc_enabled: bool = True
-
+    quic_enabled: bool = True
 
     # IPC settings
     ipc_socket_path: str = "/tmp/regennexus.sock"
@@ -127,6 +128,11 @@ class TransportConfig:
     queue_retry_delay: float = 5.0
     queue_persist: bool = False
     queue_persist_path: str = "./regennexus_queue"
+
+    # QUIC settings
+    quic_port: int = 8001
+    quic_port_range: tuple = (8001, 8100)
+    quic_cert_path: str = "certificates"
 
     # General settings
     connect_timeout: float = 10.0

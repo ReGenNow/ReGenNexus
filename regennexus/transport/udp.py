@@ -47,25 +47,43 @@ MDNS_SERVICE_TYPE = "_regennexus._udp.local."
 class RegenNexusServiceListener:
     """Listener for mDNS service discovery."""
 
-    def __init__(self, transport: "UDPTransport"):
+    def __init__(self, transport: "UDPTransport", loop: asyncio.AbstractEventLoop):
         self.transport = transport
+        self._loop = loop  # Store event loop reference for thread-safe scheduling
 
     def add_service(self, zc: "Zeroconf", service_type: str, name: str) -> None:
-        """Called when a service is discovered."""
-        asyncio.create_task(self._handle_service(zc, service_type, name, "add"))
+        """Called when a service is discovered (from zeroconf thread)."""
+        logger.debug(f"mDNS add_service callback: {name}")
+        # Use run_coroutine_threadsafe to schedule on the main event loop
+        try:
+            asyncio.run_coroutine_threadsafe(
+                self._handle_service(zc, service_type, name, "add"),
+                self._loop
+            )
+        except Exception as e:
+            logger.error(f"Error scheduling mDNS callback: {e}")
 
     def remove_service(self, zc: "Zeroconf", service_type: str, name: str) -> None:
-        """Called when a service is removed."""
-        asyncio.create_task(self._handle_service(zc, service_type, name, "remove"))
+        """Called when a service is removed (from zeroconf thread)."""
+        asyncio.run_coroutine_threadsafe(
+            self._handle_service(zc, service_type, name, "remove"),
+            self._loop
+        )
 
     def update_service(self, zc: "Zeroconf", service_type: str, name: str) -> None:
-        """Called when a service is updated."""
-        asyncio.create_task(self._handle_service(zc, service_type, name, "update"))
+        """Called when a service is updated (from zeroconf thread)."""
+        asyncio.run_coroutine_threadsafe(
+            self._handle_service(zc, service_type, name, "update"),
+            self._loop
+        )
 
     async def _handle_service(self, zc: "Zeroconf", service_type: str, name: str, event: str) -> None:
         """Handle service discovery event."""
         try:
-            info = zc.get_service_info(service_type, name)
+            # Use AsyncServiceInfo for async-compatible service info lookup
+            from zeroconf.asyncio import AsyncServiceInfo
+            info = AsyncServiceInfo(service_type, name)
+            await info.async_request(zc, 3000)  # 3 second timeout
             if info and info.addresses:
                 # Get peer info from mDNS
                 peer_id = info.properties.get(b"id", b"").decode("utf-8")
@@ -137,7 +155,9 @@ class RegenNexusServiceListener:
                     await self.transport._dispatch_message(goodbye_msg)
 
         except Exception as e:
-            logger.debug(f"mDNS service handling error: {e}")
+            import traceback
+            logger.warning(f"mDNS service handling error: {e}")
+            logger.debug(f"mDNS traceback: {traceback.format_exc()}")
 
 
 class UDPProtocol(asyncio.DatagramProtocol):
@@ -279,9 +299,18 @@ class UDPTransport(Transport):
                     sock.bind(("", self.config.udp_port))
                 except OSError as e:
                     logger.warning(f"Port {self.config.udp_port} busy, auto-detecting...")
-                    # Find available port in range
-                    port_range = getattr(self.config, 'udp_port_range', (5454, 5500))
-                    for port in range(port_range[0], port_range[1] + 1):
+                    # Find available port - try multiple ranges for cross-platform compatibility
+                    # 5454-5500: preferred range (avoids mDNS port 5353 on Linux)
+                    # 5353: fallback for Windows where 5454 may conflict
+                    # 5354-5400: additional fallback range
+                    fallback_ports = (
+                        list(range(5454, 5501)) +  # Primary range
+                        [5353] +                    # mDNS port (works on Windows)
+                        list(range(5354, 5401))     # Secondary range
+                    )
+                    for port in fallback_ports:
+                        if port == self.config.udp_port:
+                            continue  # Already tried this one
                         try:
                             sock.bind(("", port))
                             bound_port = port
@@ -290,7 +319,7 @@ class UDPTransport(Transport):
                         except OSError:
                             continue
                     else:
-                        raise OSError(f"No available UDP port in range {port_range}")
+                        raise OSError(f"No available UDP port found (tried {len(fallback_ports)} ports)")
 
                 # Store the actual bound port for mDNS and peer discovery
                 self._bound_port = bound_port
@@ -390,8 +419,10 @@ class UDPTransport(Transport):
                 logger.warning("Could not determine local IP - mDNS disabled")
                 return
 
-            # Create async Zeroconf instance
-            self._async_zeroconf = AsyncZeroconf()
+            # Create async Zeroconf instance with specific interface
+            # This is critical for Linux systems with multiple interfaces (e.g., docker0, br0, etc.)
+            # Without specifying the interface, Zeroconf may bind to the wrong one
+            self._async_zeroconf = AsyncZeroconf(interfaces=[local_ip])
             self._zeroconf = self._async_zeroconf.zeroconf
 
             # Create service info for registration
@@ -423,9 +454,15 @@ class UDPTransport(Transport):
             await self._async_zeroconf.async_register_service(self._mdns_service_info)
             logger.info(f"mDNS service registered: {service_name} at {local_ip}:{self._bound_port} (ws:{ws_port})")
 
-            # Start browsing for other services (async browser)
-            self._mdns_listener = RegenNexusServiceListener(self)
-            self._mdns_browser = AsyncServiceBrowser(
+            # Start browsing for other services
+            # Use sync ServiceBrowser (works better cross-platform than AsyncServiceBrowser)
+            # The callbacks are called from zeroconf's internal thread, so we use
+            # run_coroutine_threadsafe to schedule onto the asyncio event loop
+            # IMPORTANT: Use get_running_loop() not get_event_loop() - in Python 3.10+,
+            # get_event_loop() may return a different loop when called inside asyncio.run()
+            loop = asyncio.get_running_loop()
+            self._mdns_listener = RegenNexusServiceListener(self, loop)
+            self._mdns_browser = ServiceBrowser(
                 self._zeroconf,
                 MDNS_SERVICE_TYPE,
                 self._mdns_listener
@@ -453,9 +490,9 @@ class UDPTransport(Transport):
                 await self._async_zeroconf.async_unregister_service(self._mdns_service_info)
                 logger.debug("mDNS service unregistered")
 
-            # Close browser
+            # Close browser (sync ServiceBrowser uses cancel(), not async_cancel())
             if self._mdns_browser:
-                await self._mdns_browser.async_cancel()
+                self._mdns_browser.cancel()
                 self._mdns_browser = None
 
             # Close async zeroconf
@@ -471,18 +508,71 @@ class UDPTransport(Transport):
             logger.debug(f"mDNS cleanup error: {e}")
 
     def _get_local_ip(self) -> Optional[str]:
-        """Get the local IP address for mDNS registration."""
+        """Get the local IP address for mDNS registration.
+
+        Prefers LAN IPs (192.168.x.x, 10.x.x.x, 172.16-31.x.x) over VPN/tunnel IPs.
+        """
+        def is_lan_ip(ip: str) -> bool:
+            """Check if IP is a typical LAN address."""
+            parts = ip.split('.')
+            if len(parts) != 4:
+                return False
+            try:
+                first = int(parts[0])
+                second = int(parts[1])
+                # 192.168.x.x
+                if first == 192 and second == 168:
+                    return True
+                # 10.x.x.x
+                if first == 10:
+                    return True
+                # 172.16.x.x - 172.31.x.x
+                if first == 172 and 16 <= second <= 31:
+                    return True
+                return False
+            except ValueError:
+                return False
+
         try:
-            # Create a socket to determine the local IP
+            # First, try to find a LAN IP by connecting to the local gateway/broadcast
+            # Try common LAN broadcast addresses
+            lan_targets = [
+                ("192.168.68.1", 80),   # Common gateway
+                ("192.168.1.1", 80),    # Common gateway
+                ("192.168.0.1", 80),    # Common gateway
+                ("10.0.0.1", 80),       # Common gateway
+            ]
+
+            for target_ip, port in lan_targets:
+                try:
+                    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+                    s.settimeout(0.1)
+                    s.connect((target_ip, port))
+                    local_ip = s.getsockname()[0]
+                    s.close()
+                    if is_lan_ip(local_ip):
+                        logger.debug(f"Found LAN IP via {target_ip}: {local_ip}")
+                        return local_ip
+                except Exception:
+                    continue
+
+            # Fallback: Connect to public IP and check if it's a LAN address
             s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
             s.settimeout(0.1)
             try:
-                # Connect to a public IP (doesn't actually send data)
                 s.connect(("8.8.8.8", 80))
                 local_ip = s.getsockname()[0]
             finally:
                 s.close()
+
+            # If we got a LAN IP, use it
+            if is_lan_ip(local_ip):
+                return local_ip
+
+            # Otherwise, log warning but still return it (might be VPN-only network)
+            logger.debug(f"Detected non-LAN IP: {local_ip} (VPN/tunnel?)")
             return local_ip
+
         except Exception:
             # Fallback: try to get from hostname
             try:
@@ -559,6 +649,11 @@ class UDPTransport(Transport):
             data: Raw datagram data
             addr: Sender address (host, port)
         """
+        # Skip non-JSON packets (mDNS binary protocol, etc.)
+        # JSON always starts with { or [ in ASCII (0x7b or 0x5b)
+        if not data or data[0] not in (0x7b, 0x5b):  # '{' or '['
+            return  # Silently ignore non-JSON packets
+
         try:
             decoded = data.decode("utf-8")
             payload = json.loads(decoded)

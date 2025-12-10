@@ -311,6 +311,22 @@ class MeshDaemon:
         elif message.intent == "ping":
             await self._handle_ping(message)
             return
+        # CLI intent handlers (thin client commands via daemon)
+        elif message.intent == "cli.ping":
+            await self._handle_cli_ping(message)
+            return
+        elif message.intent == "cli.benchmark":
+            await self._handle_cli_benchmark(message)
+            return
+        elif message.intent == "cli.peers":
+            await self._handle_cli_peers(message)
+            return
+        elif message.intent == "cli.status":
+            await self._handle_cli_status(message)
+            return
+        elif message.intent == "cli.send":
+            await self._handle_cli_send(message)
+            return
 
         # Dispatch to registered handlers
         for handler in self._message_handlers:
@@ -414,11 +430,251 @@ class MeshDaemon:
     async def _handle_ping(self, message: Message) -> None:
         """Respond to ping with pong."""
         if self._mesh and message.sender_id:
+            # Include ping_id if present for round-trip correlation
+            ping_id = message.content.get("ping_id") if message.content else None
+            response = {
+                "pong": True,
+                "from": self._mesh.node_id,
+                "time": time.time()
+            }
+            if ping_id:
+                response["ping_id"] = ping_id
             await self._mesh.send(
                 message.sender_id,
-                {"pong": True, "from": self._mesh.node_id, "time": time.time()},
+                response,
                 intent="pong"
             )
+
+    # =========================================================================
+    # CLI Intent Handlers (thin client commands via daemon)
+    # =========================================================================
+
+    async def _handle_cli_ping(self, message: Message) -> None:
+        """
+        Handle CLI ping request - ping a peer using daemon's persistent connection.
+
+        Request content: {target: str, count: int, timeout: float}
+        Response: {results: [...], success: bool}
+        """
+        if not self._mesh or not message.sender_id:
+            return
+
+        content = message.content or {}
+        target = content.get("target")
+        count = content.get("count", 1)
+        timeout = content.get("timeout", 5.0)
+
+        if not target:
+            await self._mesh.send(
+                message.sender_id,
+                {"error": "No target specified", "success": False},
+                intent="cli.ping.result"
+            )
+            return
+
+        # Find target peer by ID or partial match
+        target_id = None
+        peers = self._mesh.get_peers()
+        for peer in peers:
+            if peer.node_id == target or target.lower() in peer.node_id.lower():
+                target_id = peer.node_id
+                break
+
+        if not target_id:
+            await self._mesh.send(
+                message.sender_id,
+                {"error": f"Peer '{target}' not found", "success": False, "available_peers": [p.node_id for p in peers]},
+                intent="cli.ping.result"
+            )
+            return
+
+        # Perform pings using PeerManager's persistent connection
+        results = []
+        for i in range(count):
+            rtt = await self._mesh.ping(target_id, timeout=timeout)
+            results.append({
+                "seq": i + 1,
+                "target": target_id,
+                "rtt_ms": rtt,
+                "success": rtt is not None
+            })
+            if i < count - 1:
+                await asyncio.sleep(0.5)  # Small delay between pings
+
+        # Calculate summary
+        successful = [r for r in results if r["success"]]
+        summary = {
+            "target": target_id,
+            "sent": count,
+            "received": len(successful),
+            "loss_percent": ((count - len(successful)) / count) * 100 if count > 0 else 100,
+            "avg_rtt_ms": sum(r["rtt_ms"] for r in successful) / len(successful) if successful else None,
+            "min_rtt_ms": min(r["rtt_ms"] for r in successful) if successful else None,
+            "max_rtt_ms": max(r["rtt_ms"] for r in successful) if successful else None,
+        }
+
+        await self._mesh.send(
+            message.sender_id,
+            {"results": results, "summary": summary, "success": len(successful) > 0},
+            intent="cli.ping.result"
+        )
+
+    async def _handle_cli_benchmark(self, message: Message) -> None:
+        """
+        Handle CLI benchmark request - benchmark all peers using daemon's connections.
+
+        Request content: {count: int, timeout: float}
+        Response: {results: {...}, success: bool}
+        """
+        if not self._mesh or not message.sender_id:
+            return
+
+        content = message.content or {}
+        count = content.get("count", 5)
+        timeout = content.get("timeout", 5.0)
+
+        peers = self._mesh.get_peers()
+        if not peers:
+            await self._mesh.send(
+                message.sender_id,
+                {"error": "No peers available", "success": False},
+                intent="cli.benchmark.result"
+            )
+            return
+
+        # Benchmark each peer
+        results = {}
+        for peer in peers:
+            peer_results = []
+            for i in range(count):
+                rtt = await self._mesh.ping(peer.node_id, timeout=timeout)
+                peer_results.append(rtt)
+                if i < count - 1:
+                    await asyncio.sleep(0.2)
+
+            successful = [r for r in peer_results if r is not None]
+            results[peer.node_id] = {
+                "entity_type": peer.entity_type,
+                "connection_state": getattr(peer, 'connection_state', 'unknown'),
+                "sent": count,
+                "received": len(successful),
+                "loss_percent": ((count - len(successful)) / count) * 100,
+                "avg_rtt_ms": round(sum(successful) / len(successful), 2) if successful else None,
+                "min_rtt_ms": round(min(successful), 2) if successful else None,
+                "max_rtt_ms": round(max(successful), 2) if successful else None,
+                "rtts": [round(r, 2) if r else None for r in peer_results]
+            }
+
+        await self._mesh.send(
+            message.sender_id,
+            {"results": results, "peer_count": len(peers), "success": True},
+            intent="cli.benchmark.result"
+        )
+
+    async def _handle_cli_peers(self, message: Message) -> None:
+        """
+        Handle CLI peers request - return detailed peer information.
+
+        Response includes connection state, RTT, and capabilities.
+        """
+        if not self._mesh or not message.sender_id:
+            return
+
+        peers = self._mesh.get_peers()
+        peer_list = []
+
+        for peer in peers:
+            peer_info = {
+                "node_id": peer.node_id,
+                "entity_type": peer.entity_type,
+                "capabilities": peer.capabilities,
+                "address": peer.address,
+                "port": peer.port,
+                "ws_url": getattr(peer, 'ws_url', None),
+                "transport": peer.transport.value if hasattr(peer.transport, 'value') else str(peer.transport),
+                "connection_state": getattr(peer, 'connection_state', 'unknown'),
+                "last_rtt_ms": getattr(peer, 'last_rtt', None),
+                "last_seen": peer.last_seen,
+                "is_connected": getattr(peer, 'is_connected', False),
+            }
+            peer_list.append(peer_info)
+
+        await self._mesh.send(
+            message.sender_id,
+            {"peers": peer_list, "count": len(peer_list), "local_id": self._mesh.node_id},
+            intent="cli.peers.result"
+        )
+
+    async def _handle_cli_status(self, message: Message) -> None:
+        """
+        Handle CLI status request - return full daemon status.
+        """
+        if not self._mesh or not message.sender_id:
+            return
+
+        status = self.get_status()
+
+        # Add PeerManager stats if available
+        if hasattr(self._mesh, '_peer_manager') and self._mesh._peer_manager:
+            pm = self._mesh._peer_manager
+            status["peer_manager"] = {
+                "active_connections": len([p for p in pm._peers.values() if p.state.value == "connected"]),
+                "total_peers": len(pm._peers),
+                "keepalive_interval": pm._keepalive_interval,
+            }
+
+        await self._mesh.send(
+            message.sender_id,
+            status,
+            intent="cli.status.result"
+        )
+
+    async def _handle_cli_send(self, message: Message) -> None:
+        """
+        Handle CLI send request - send a message to a peer via daemon.
+
+        Request content: {target: str, payload: any, intent: str}
+        """
+        if not self._mesh or not message.sender_id:
+            return
+
+        content = message.content or {}
+        target = content.get("target")
+        payload = content.get("payload", {})
+        intent = content.get("intent", "message")
+
+        if not target:
+            await self._mesh.send(
+                message.sender_id,
+                {"error": "No target specified", "success": False},
+                intent="cli.send.result"
+            )
+            return
+
+        # Find target peer
+        target_id = None
+        peers = self._mesh.get_peers()
+        for peer in peers:
+            if peer.node_id == target or target.lower() in peer.node_id.lower():
+                target_id = peer.node_id
+                break
+
+        if not target_id:
+            await self._mesh.send(
+                message.sender_id,
+                {"error": f"Peer '{target}' not found", "success": False},
+                intent="cli.send.result"
+            )
+            return
+
+        # Send via daemon's persistent connection
+        success = await self._mesh.send(target_id, payload, intent=intent)
+
+        await self._mesh.send(
+            message.sender_id,
+            {"success": success, "target": target_id, "intent": intent},
+            intent="cli.send.result"
+        )
 
     async def _handle_peer_event(self, peer: MeshNode, event: str) -> None:
         """Handle peer events."""

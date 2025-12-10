@@ -118,7 +118,7 @@ class RegenNexus:
             "communication": {
                 "auto_select": True,
                 "local_ipc": {"enabled": True},
-                "udp_discovery": {"enabled": True, "port": 5353},
+                "udp_discovery": {"enabled": True, "port": 5454},
                 "websocket": {"enabled": True, "host": "0.0.0.0", "port": 8765},
                 "message_queue": {"enabled": False},
             },
