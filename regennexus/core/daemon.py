@@ -11,6 +11,7 @@ Copyright (c) 2024-2025 ReGen Designs LLC
 import asyncio
 import json
 import logging
+import logging.handlers
 import os
 import signal
 import sys
@@ -299,8 +300,14 @@ class MeshDaemon:
 
     async def _handle_message(self, message: Message) -> None:
         """Handle incoming messages."""
-        logger.info(f"Message from {message.sender_id}: intent={message.intent}")
-
+        # Skip logging for frequent mesh protocol messages to avoid log spam
+        # These messages arrive every few seconds from each peer
+        noisy_intents = ("mesh.announce", "mesh.pong", "peer_announce", "peer_announce_ack")
+        if message.intent in noisy_intents:
+            logger.debug(f"Message from {message.sender_id}: intent={message.intent}")
+        else:
+            logger.info(f"Message from {message.sender_id}: intent={message.intent}")
+    
         # Built-in intent handlers
         if message.intent == "execute" and message.content:
             await self._handle_execute(message)
