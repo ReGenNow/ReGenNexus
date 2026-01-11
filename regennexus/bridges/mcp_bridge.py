@@ -732,6 +732,297 @@ def create_hardware_mcp_server() -> MCPServer:
         }
     ))
 
+    # =========================================================================
+    # GPIO Extended Tools
+    # =========================================================================
+
+    # GPIO read tool
+    server.register_tool(MCPTool(
+        name="gpio_read",
+        description="Read the current state of a GPIO pin (HIGH=1 or LOW=0)",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Device ID (e.g., 'raspi-001')"
+                },
+                "pin": {
+                    "type": "integer",
+                    "description": "GPIO pin number to read"
+                }
+            },
+            "required": ["device_id", "pin"]
+        }
+    ))
+
+    # PWM write tool
+    server.register_tool(MCPTool(
+        name="pwm_write",
+        description="Set PWM duty cycle on a pin (0-100%) for motors, LEDs, servos",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Device ID (e.g., 'raspi-001')"
+                },
+                "pin": {
+                    "type": "integer",
+                    "description": "PWM-capable pin number"
+                },
+                "duty_cycle": {
+                    "type": "number",
+                    "minimum": 0,
+                    "maximum": 100,
+                    "description": "Duty cycle percentage (0-100)"
+                },
+                "frequency": {
+                    "type": "number",
+                    "description": "PWM frequency in Hz (optional, default varies by device)"
+                }
+            },
+            "required": ["device_id", "pin", "duty_cycle"]
+        }
+    ))
+
+    # =========================================================================
+    # I2C/Serial Tools
+    # =========================================================================
+
+    # I2C scan tool
+    server.register_tool(MCPTool(
+        name="i2c_scan",
+        description="Scan I2C bus for connected devices and return their addresses",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Device ID (e.g., 'raspi-001')"
+                },
+                "bus": {
+                    "type": "integer",
+                    "description": "I2C bus number (default: 1)"
+                }
+            },
+            "required": ["device_id"]
+        }
+    ))
+
+    # Serial send tool
+    server.register_tool(MCPTool(
+        name="serial_send",
+        description="Send data over serial port (UART)",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Device ID"
+                },
+                "port": {
+                    "type": "string",
+                    "description": "Serial port (e.g., '/dev/ttyUSB0', 'COM3')"
+                },
+                "data": {
+                    "type": "string",
+                    "description": "Data to send (string or hex bytes)"
+                },
+                "baudrate": {
+                    "type": "integer",
+                    "description": "Baud rate (default: 9600)"
+                }
+            },
+            "required": ["device_id", "port", "data"]
+        }
+    ))
+
+    # Serial read tool
+    server.register_tool(MCPTool(
+        name="serial_read",
+        description="Read data from serial port (UART)",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Device ID"
+                },
+                "port": {
+                    "type": "string",
+                    "description": "Serial port (e.g., '/dev/ttyUSB0', 'COM3')"
+                },
+                "bytes": {
+                    "type": "integer",
+                    "description": "Number of bytes to read (default: 256)"
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": "Read timeout in seconds (default: 1.0)"
+                },
+                "baudrate": {
+                    "type": "integer",
+                    "description": "Baud rate (default: 9600)"
+                }
+            },
+            "required": ["device_id", "port"]
+        }
+    ))
+
+    # =========================================================================
+    # Device Info Tools
+    # =========================================================================
+
+    # Device info tool
+    server.register_tool(MCPTool(
+        name="device_info",
+        description="Get detailed device information (CPU, memory, IP, temperature)",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Device ID (e.g., 'raspi-001', 'jetson-001')"
+                }
+            },
+            "required": ["device_id"]
+        }
+    ))
+
+    # =========================================================================
+    # Camera Tools
+    # =========================================================================
+
+    # Camera capture tool
+    server.register_tool(MCPTool(
+        name="camera_capture",
+        description="Capture a single image from a camera",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "device_id": {
+                    "type": "string",
+                    "description": "Device ID with camera"
+                },
+                "camera_id": {
+                    "type": "integer",
+                    "description": "Camera index (default: 0)"
+                },
+                "resolution": {
+                    "type": "string",
+                    "enum": ["640x480", "1280x720", "1920x1080"],
+                    "description": "Image resolution"
+                },
+                "format": {
+                    "type": "string",
+                    "enum": ["jpeg", "png", "base64"],
+                    "description": "Output format (default: jpeg)"
+                }
+            },
+            "required": ["device_id"]
+        }
+    ))
+
+    # =========================================================================
+    # Mesh Network Tools
+    # =========================================================================
+
+    # List mesh nodes tool
+    server.register_tool(MCPTool(
+        name="list_nodes",
+        description="List all nodes in the mesh network (Raspberry Pi, Jetson, robots, etc.)",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "filter_type": {
+                    "type": "string",
+                    "description": "Filter by entity type (e.g., 'device', 'robot', 'sensor')"
+                }
+            }
+        }
+    ))
+
+    # Ping mesh node tool
+    server.register_tool(MCPTool(
+        name="ping_node",
+        description="Ping a mesh node and measure network latency",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "description": "Target node ID (e.g., 'raspi-001', 'jetson-001')"
+                },
+                "timeout": {
+                    "type": "number",
+                    "description": "Timeout in seconds (default: 5.0)"
+                }
+            },
+            "required": ["node_id"]
+        }
+    ))
+
+    # Send to node tool
+    server.register_tool(MCPTool(
+        name="send_to_node",
+        description="Send a message/command to a specific mesh node",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "node_id": {
+                    "type": "string",
+                    "description": "Target node ID"
+                },
+                "intent": {
+                    "type": "string",
+                    "description": "Message intent (e.g., 'command', 'query', 'event')"
+                },
+                "content": {
+                    "type": "object",
+                    "description": "Message content/payload"
+                }
+            },
+            "required": ["node_id", "intent", "content"]
+        }
+    ))
+
+    # Broadcast message tool
+    server.register_tool(MCPTool(
+        name="broadcast_message",
+        description="Broadcast a message to all nodes in the mesh network",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "intent": {
+                    "type": "string",
+                    "description": "Message intent (e.g., 'announcement', 'sync', 'alert')"
+                },
+                "content": {
+                    "type": "object",
+                    "description": "Message content/payload"
+                }
+            },
+            "required": ["intent", "content"]
+        }
+    ))
+
+    # Find by capability tool
+    server.register_tool(MCPTool(
+        name="find_by_capability",
+        description="Find mesh nodes that have a specific capability",
+        input_schema={
+            "type": "object",
+            "properties": {
+                "capability": {
+                    "type": "string",
+                    "description": "Capability to search for (e.g., 'gpio', 'camera', 'arm', 'gripper')"
+                }
+            },
+            "required": ["capability"]
+        }
+    ))
+
     # Hardware control prompt
     server.register_prompt(MCPPrompt(
         name="hardware_assistant",
