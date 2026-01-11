@@ -42,3 +42,7 @@ logs/
 # Cloned repos (MCP servers fork, etc.)
 servers/
 
+# Claude Code project files (contain credentials/secrets)
+CLAUDE.md
+.claude/
+
