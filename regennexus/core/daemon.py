@@ -111,10 +111,16 @@ class MeshDaemon:
         self._restart_count = 0
 
     def _setup_logging(self) -> None:
-        """Setup logging to file."""
+        """Setup logging to file with rotation."""
         self.log_file.parent.mkdir(parents=True, exist_ok=True)
 
-        handler = logging.FileHandler(self.log_file)
+        # Use RotatingFileHandler to prevent unbounded log growth
+        # Max 10MB per file, keep 3 backup files (total max ~40MB)
+        handler = logging.handlers.RotatingFileHandler(
+            self.log_file,
+            maxBytes=10 * 1024 * 1024,  # 10MB
+            backupCount=3,
+        )
         handler.setFormatter(logging.Formatter(
             '%(asctime)s - %(name)s - %(levelname)s - %(message)s'
         ))
@@ -307,7 +313,7 @@ class MeshDaemon:
             logger.debug(f"Message from {message.sender_id}: intent={message.intent}")
         else:
             logger.info(f"Message from {message.sender_id}: intent={message.intent}")
-    
+
         # Built-in intent handlers
         if message.intent == "execute" and message.content:
             await self._handle_execute(message)
