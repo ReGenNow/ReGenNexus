@@ -2,7 +2,7 @@
 
 **Universal Adapter Protocol** - Connect devices, robots, apps, and AI agents with minimal latency and maximum security. MCP-compatible for seamless AI integration.
 
-![ReGenNexus Logo](https://raw.githubusercontent.com/ReGenNow/ReGenNexus/main/images/rguap.png)
+![ReGenNexus Logo](https://raw.githubusercontent.com/ReGenNow/ReGenNexus/main/images/rguapa.png)
 
 ## Installation
 
@@ -216,3 +216,4 @@ MIT License - see [LICENSE](LICENSE) for details.
 **RegenNexus UAP** - Connect Everything, Securely.
 
 Copyright (c) 2024-2025 ReGen Designs LLC
+
